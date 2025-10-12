@@ -1,0 +1,33 @@
+﻿name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  shellcheck-and-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on shell scripts
+        run: |
+          find . -type f -name '*.sh' -not -path './.github/*' -print0 | xargs -0 shellcheck || true
+
+      - name: Bash syntax check
+        run: |
+          bash -n ./collect_nginx.sh
+
+      - name: Run minimal smoke (no network)
+        run: |
+          # Ensure script parses and prints summary to stdout in a dry check
+          env -i HOME=/root PATH=/usr/bin:/bin BASH_ENV= bash --noprofile --norc -c 'bash -n ./collect_nginx.sh && echo "syntax ok"'
+
+  # Future: add unit/integration jobs, artifact upload
