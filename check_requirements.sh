@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# Trap to ensure colors are reset on exit
+trap 'printf "\033[0m" 2>/dev/null' EXIT INT TERM
+
 # Version information
 VERSION="2.2.0"
 
@@ -2248,6 +2251,9 @@ check_additional_tools() {
         echo ""
     fi
     
+    # Reset terminal colors after testssl.sh (it uses ANSI codes that may not reset properly)
+    printf '\033[0m' 2>/dev/null || true
+    
     # HTML/PDF generation tools
     echo ""
     log "--- Report Generation Tools ---"
@@ -2636,6 +2642,10 @@ main() {
     # Final summary
     if [ "$total_missing" -eq 0 ]; then
         log "✅ All requirements satisfied!"
+        
+        # Reset terminal colors to default
+        printf '\033[0m'
+        
         exit 0
     else
         log "❌ Some requirements are missing. See details below."

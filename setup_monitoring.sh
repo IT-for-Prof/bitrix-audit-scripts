@@ -2,7 +2,8 @@
 # Automatic setup of monitoring tools for Bitrix24 audit
 # Usage: ./setup_monitoring.sh [--force] [--non-interactive]
 
-set -euo pipefail
+# Use set -e only for critical sections, not globally
+# set -euo pipefail
 
 # Version information
 VERSION="2.1.0"
@@ -14,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/audit_common.sh"
 
 # Setup locale using common functions
-setup_locale
+# setup_locale
 
 # Default settings
 FORCE_INSTALL=0
@@ -123,7 +124,7 @@ detect_distro() {
     if [ -f /etc/os-release ]; then
         distro_id=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
         distro_version=$(grep "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
-        distro_codename=$(grep "^VERSION_CODENAME=" /etc/os-release | cut -d= -f2 | tr -d '"')
+        distro_codename=$(grep "^VERSION_CODENAME=" /etc/os-release | cut -d= -f2 | tr -d '"' || echo "")
     fi
     
     # Determine package manager
@@ -148,6 +149,8 @@ detect_distro() {
     export DISTRO_VERSION="$distro_version"
     export DISTRO_CODENAME="$distro_codename"
     export PACKAGE_MANAGER="$package_manager"
+    
+    log_verbose "DEBUG: detect_distro completed successfully"
 }
 
 # Create backup of file with timestamp
@@ -207,7 +210,20 @@ configure_sysstat() {
             ;;
         "dnf")
             sysstat_config="/etc/sysconfig/sysstat"
-            cron_file="/etc/cron.d/sysstat"
+            # Check if this is a newer system (RHEL 8+, AlmaLinux 8+, CentOS 8+) that uses systemd timers
+            if [ -f /etc/os-release ]; then
+                local major_version=$(grep "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d '"' | cut -d. -f1)
+                if [ "$major_version" -ge 8 ] 2>/dev/null; then
+                    # Newer systems use systemd timers
+                    cron_file=""
+                else
+                    # Older systems (RHEL 7, CentOS 7) use cron
+                    cron_file="/etc/cron.d/sysstat"
+                fi
+            else
+                # Fallback: assume older system with cron
+                cron_file="/etc/cron.d/sysstat"
+            fi
             ;;
     esac
     
@@ -227,8 +243,8 @@ configure_sysstat() {
         log_warning "sysstat config file not found: $sysstat_config"
     fi
     
-    # Configure cron for sysstat
-    if [ -f "$cron_file" ]; then
+    # Configure cron for sysstat (or systemd timers on newer systems)
+    if [ -n "$cron_file" ] && [ -f "$cron_file" ]; then
         backup_file "$cron_file"
         
         # Update sa1 to run every minute with 30-second intervals
@@ -242,6 +258,22 @@ configure_sysstat() {
         fi
         
         log_success "sysstat cron configuration updated"
+    elif [ -z "$cron_file" ]; then
+        # On newer systems (AlmaLinux 9+), sysstat uses systemd timers
+        log_info "sysstat uses systemd timers (modern configuration)"
+        
+        # Check if timers are active
+        if systemctl is-active --quiet sysstat-collect.timer; then
+            log_success "sysstat-collect timer is active"
+        else
+            log_warning "sysstat-collect timer is not active"
+        fi
+        
+        if systemctl is-active --quiet sysstat-summary.timer; then
+            log_success "sysstat-summary timer is active"
+        else
+            log_warning "sysstat-summary timer is not active"
+        fi
     else
         log_warning "sysstat cron file not found: $cron_file"
     fi
