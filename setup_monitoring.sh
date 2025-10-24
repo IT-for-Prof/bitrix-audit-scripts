@@ -221,9 +221,32 @@ get_service_status() {
             fi
         fi
         
+        # Special handling for timer-based services
+        if [ "$status" = "inactive" ] || [ "$status" = "unknown" ]; then
+            # Check if service uses timers (common in modern distributions)
+            local timers=$(get_service_timers "$service_name")
+            if [ -n "$timers" ]; then
+                local timer_active=false
+                for timer in $timers; do
+                    if systemctl is-active "$timer" >/dev/null 2>&1; then
+                        timer_active=true
+                        break
+                    fi
+                done
+                
+                if [ "$timer_active" = true ]; then
+                    status="active-timer"
+                    description="running via systemd timers"
+                fi
+            fi
+        fi
+        
         case "$status" in
             "active")
                 description="running"
+                ;;
+            "active-timer")
+                description="running via systemd timers"
                 ;;
             "inactive")
                 description="installed but not started"
@@ -240,7 +263,87 @@ get_service_status() {
         esac
     fi
     
+    # Check alternative startup methods if systemd service not found or inactive
+    if [ "$status" = "not-found" ] || [ "$status" = "inactive" ]; then
+        # Check for cron-based startup
+        if [ "$service_name" = "sysstat" ]; then
+            if crontab -l 2>/dev/null | grep -q "sa1\|sa2" || \
+               [ -f /etc/cron.d/sysstat ] || \
+               [ -f /etc/cron.hourly/sysstat ]; then
+                status="active-cron"
+                description="running via cron (legacy mode)"
+            fi
+        fi
+        
+        # Check if process is running directly
+        if pgrep -x "$service_name" >/dev/null 2>&1; then
+            status="active-manual"
+            description="running (started manually or via non-systemd)"
+        fi
+    fi
+    
     echo "$status|$description"
+}
+
+# Get associated timers for a service
+get_service_timers() {
+    local service_name="$1"
+    local timers=""
+    
+    case "$service_name" in
+        "sysstat")
+            timers="sysstat-collect.timer sysstat-summary.timer"
+            ;;
+        "atop")
+            timers="atop-rotate.timer"
+            ;;
+    esac
+    
+    echo "$timers"
+}
+
+# Check and enable systemd timers for a service
+check_and_enable_timers() {
+    local service_name="$1"
+    local timers=$(get_service_timers "$service_name")
+    local enabled_count=0
+    
+    if [ -z "$timers" ]; then
+        return 0
+    fi
+    
+    for timer in $timers; do
+        if systemctl list-unit-files | grep -q "^${timer} "; then
+            log_info "Found timer: $timer"
+            
+            # Check if enabled
+            if ! systemctl is-enabled "$timer" >/dev/null 2>&1; then
+                log_info "Enabling timer: $timer"
+                if systemctl enable "$timer" >/dev/null 2>&1; then
+                    log_success "Timer $timer enabled"
+                    enabled_count=$((enabled_count + 1))
+                else
+                    log_warning "Failed to enable timer: $timer"
+                fi
+            else
+                log_success "Timer $timer already enabled"
+            fi
+            
+            # Check if active
+            if ! systemctl is-active "$timer" >/dev/null 2>&1; then
+                log_info "Starting timer: $timer"
+                if systemctl start "$timer" >/dev/null 2>&1; then
+                    log_success "Timer $timer started"
+                else
+                    log_warning "Failed to start timer: $timer"
+                fi
+            else
+                log_success "Timer $timer is active"
+            fi
+        fi
+    done
+    
+    return 0
 }
 
 # Get service configuration
@@ -345,7 +448,7 @@ compare_config_with_expected() {
             fi
             
             # Check HISTORY
-            local history=$(echo "$current_config" | grep -o 'HISTORY=[0-9]*' | cut -d= -f2)
+            local history=$(echo "$current_config" | grep -o 'HISTORY=[0-9]*' | tail -1 | cut -d= -f2)
             if [ -n "$history" ]; then
                 if [ "$history" -ge 7 ]; then
                     issues="${issues}✓ HISTORY=$history (>=7 days)\n"
@@ -368,7 +471,7 @@ compare_config_with_expected() {
             fi
             
             # Check LOGINTERVAL
-            local interval=$(echo "$current_config" | grep -o 'LOGINTERVAL=[0-9]*' | cut -d= -f2)
+            local interval=$(echo "$current_config" | grep -o 'LOGINTERVAL=[0-9]*' | tail -1 | cut -d= -f2)
             if [ -n "$interval" ]; then
                 if [ "$interval" -le 30 ]; then
                     issues="${issues}✓ LOGINTERVAL=$interval (<=30s)\n"
@@ -382,7 +485,7 @@ compare_config_with_expected() {
             fi
             
             # Check LOGSAVINGS
-            local savings=$(echo "$current_config" | grep -o 'LOGSAVINGS=[0-9]*' | cut -d= -f2)
+            local savings=$(echo "$current_config" | grep -o 'LOGSAVINGS=[0-9]*' | tail -1 | cut -d= -f2)
             if [ -n "$savings" ]; then
                 if [ "$savings" -ge 7 ]; then
                     issues="${issues}✓ LOGSAVINGS=$savings (>=7 days)\n"
@@ -520,12 +623,37 @@ diagnose_service_comprehensive() {
     # Check data collection
     data_collection=$(check_service_data_collection "$service_name")
     
+    # Check associated timers
+    local timers=$(get_service_timers "$service_name")
+    local timer_info=""
+    if [ -n "$timers" ]; then
+        timer_info="Associated Timers:\n"
+        for timer in $timers; do
+            if systemctl list-unit-files | grep -q "^${timer} "; then
+                local timer_status=$(systemctl is-active "$timer" 2>/dev/null || echo "inactive")
+                local timer_enabled=$(systemctl is-enabled "$timer" 2>/dev/null || echo "disabled")
+                
+                if [ "$timer_status" = "active" ] && [ "$timer_enabled" = "enabled" ]; then
+                    timer_info="${timer_info}  ✓ $timer: active, enabled\n"
+                elif [ "$timer_status" = "active" ]; then
+                    timer_info="${timer_info}  ⚠ $timer: active, but not enabled\n"
+                else
+                    timer_info="${timer_info}  ✗ $timer: $timer_status, $timer_enabled\n"
+                fi
+            else
+                timer_info="${timer_info}  ℹ $timer: not found (optional)\n"
+            fi
+        done
+    fi
+    
     # Determine overall status
     local overall_status="OK"
     if [ "$status" = "not-found" ] || [ "$status" = "failed" ]; then
         overall_status="CRITICAL"
     elif [ "$status" = "inactive" ] || [ "$status" = "unknown" ]; then
         overall_status="WARNING"
+    elif [ "$status" = "active-timer" ] || [ "$status" = "active-cron" ] || [ "$status" = "active-manual" ]; then
+        overall_status="OK"
     fi
     
     # Check for critical issues in comparison
@@ -542,6 +670,29 @@ diagnose_service_comprehensive() {
     echo "Overall Status: $overall_status"
     echo "Service Status: $status ($description)"
     echo "Config File: $config_file"
+    
+    # Show how service is started
+    case "$status" in
+        "active")
+            echo "Startup Method: systemd service"
+            ;;
+        "active-timer")
+            echo "Startup Method: systemd timers"
+            ;;
+        "active-cron")
+            echo "Startup Method: cron (legacy)"
+            if [ "$service_name" = "sysstat" ]; then
+                echo "Cron Jobs:"
+                crontab -l 2>/dev/null | grep "sa1\|sa2" | sed 's/^/  /'
+                [ -f /etc/cron.d/sysstat ] && echo "  Config: /etc/cron.d/sysstat"
+            fi
+            ;;
+        "active-manual")
+            echo "Startup Method: manual or non-systemd"
+            echo "Process Info:"
+            pgrep -a "$service_name" | sed 's/^/  /'
+            ;;
+    esac
     
     if [ -n "$pid" ] && [ "$pid" != "0" ]; then
         echo "PID: $pid"
@@ -561,6 +712,10 @@ diagnose_service_comprehensive() {
     if [ -n "$data_collection" ]; then
         echo -e "\nData Collection:"
         echo -e "$data_collection"
+    fi
+    
+    if [ -n "$timer_info" ]; then
+        echo -e "\n$timer_info"
     fi
     
     echo ""
@@ -818,6 +973,18 @@ enable_services() {
             continue
         fi
         
+        # Check if service uses timers instead of traditional service
+        local timers=$(get_service_timers "$service")
+        local timer_based=false
+        if [ -n "$timers" ]; then
+            for timer in $timers; do
+                if systemctl list-unit-files | grep -q "^${timer} "; then
+                    timer_based=true
+                    break
+                fi
+            done
+        fi
+        
         # Enable service
         log_info "Enabling $service service..."
         if systemctl enable "$service" >/dev/null 2>&1; then
@@ -837,6 +1004,13 @@ enable_services() {
             sleep 2
             if systemctl is-active "$service" >/dev/null 2>&1; then
                 log_success "$service service is running"
+                
+                # Check and enable associated timers
+                check_and_enable_timers "$service"
+            elif [ "$timer_based" = true ]; then
+                log_info "$service uses timers, checking timer status..."
+                check_and_enable_timers "$service"
+                log_success "$service configured for timer-based operation"
             else
                 log_warning "$service service started but not running"
                 log_info "Check logs: journalctl -u $service"
