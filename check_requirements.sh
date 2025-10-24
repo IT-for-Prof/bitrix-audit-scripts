@@ -538,6 +538,11 @@ get_redis_details() {
     local version=""
     local mode=""
     local memory=""
+    local used_memory=""
+    local maxmemory_policy=""
+    local connected_clients=""
+    local persistence_rdb=""
+    local persistence_aof=""
     
     # Get TCP ports
     ports=$(get_service_ports "redis-server")
@@ -556,6 +561,15 @@ get_redis_details() {
         if redis-cli ping >/dev/null 2>&1; then
             mode=$(redis-cli info replication 2>/dev/null | grep "role:" | cut -d: -f2 | tr -d '\r' || echo "unknown")
             memory=$(redis-cli config get maxmemory 2>/dev/null | tail -n1 | sed 's/^0$//' || echo "unknown")
+            
+            # Get additional memory info
+            used_memory=$(redis-cli info memory 2>/dev/null | grep "used_memory:" | cut -d: -f2 | tr -d '\r' || echo "unknown")
+            maxmemory_policy=$(redis-cli config get maxmemory-policy 2>/dev/null | tail -n1 || echo "unknown")
+            connected_clients=$(redis-cli info clients 2>/dev/null | grep "connected_clients:" | cut -d: -f2 | tr -d '\r' || echo "unknown")
+            
+            # Get persistence settings
+            persistence_rdb=$(redis-cli config get save 2>/dev/null | tail -n1 || echo "unknown")
+            persistence_aof=$(redis-cli config get appendonly 2>/dev/null | tail -n1 || echo "unknown")
         fi
     fi
     
@@ -596,6 +610,48 @@ get_redis_details() {
         fi
     fi
     
+    if [ -n "$used_memory" ] && [ "$used_memory" != "unknown" ] && [ "$used_memory" != "0" ]; then
+        # Convert bytes to MB
+        local used_memory_mb=$((used_memory / 1024 / 1024))
+        if [ -n "$details" ]; then
+            details="$details, Used Memory: ${used_memory_mb}MB"
+        else
+            details="Used Memory: ${used_memory_mb}MB"
+        fi
+    fi
+    
+    if [ -n "$maxmemory_policy" ] && [ "$maxmemory_policy" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Eviction Policy: $maxmemory_policy"
+        else
+            details="Eviction Policy: $maxmemory_policy"
+        fi
+    fi
+    
+    if [ -n "$connected_clients" ] && [ "$connected_clients" != "unknown" ] && [ "$connected_clients" != "0" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Connected Clients: $connected_clients"
+        else
+            details="Connected Clients: $connected_clients"
+        fi
+    fi
+    
+    if [ -n "$persistence_rdb" ] && [ "$persistence_rdb" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, RDB Persistence: $persistence_rdb"
+        else
+            details="RDB Persistence: $persistence_rdb"
+        fi
+    fi
+    
+    if [ -n "$persistence_aof" ] && [ "$persistence_aof" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, AOF Persistence: $persistence_aof"
+        else
+            details="AOF Persistence: $persistence_aof"
+        fi
+    fi
+    
     echo "$details"
 }
 
@@ -606,6 +662,9 @@ get_memcached_details() {
     local version=""
     local memory=""
     local connections=""
+    local curr_connections=""
+    local total_connections=""
+    local evictions=""
     
     # Get TCP ports
     ports=$(get_service_ports "memcached")
@@ -618,14 +677,21 @@ get_memcached_details() {
     # Try to get memory and connection info via telnet/nc
     if [ -n "$ports" ]; then
         local port=$(echo "$ports" | cut -d',' -f1)
+        local stats_output=""
+        
+        # Try nc first, then telnet as fallback
         if command -v nc >/dev/null 2>&1; then
-            # Get stats from memcached
-            local stats_output
-            stats_output=$(echo "stats" | nc localhost "$port" 2>/dev/null | head -n20)
-            if [ -n "$stats_output" ]; then
-                memory=$(echo "$stats_output" | grep "limit_maxbytes" | awk '{print $3}' | head -n1)
-                connections=$(echo "$stats_output" | grep "max_connections" | awk '{print $3}' | head -n1)
-            fi
+            stats_output=$(echo "stats" | nc localhost "$port" 2>/dev/null | head -n30)
+        elif command -v telnet >/dev/null 2>&1; then
+            stats_output=$(echo -e "stats\nquit" | telnet localhost "$port" 2>/dev/null | head -n30)
+        fi
+        
+        if [ -n "$stats_output" ]; then
+            memory=$(echo "$stats_output" | grep "limit_maxbytes" | awk '{print $3}' | head -n1)
+            connections=$(echo "$stats_output" | grep "max_connections" | awk '{print $3}' | head -n1)
+            curr_connections=$(echo "$stats_output" | grep "curr_connections" | awk '{print $3}' | head -n1)
+            total_connections=$(echo "$stats_output" | grep "total_connections" | awk '{print $3}' | head -n1)
+            evictions=$(echo "$stats_output" | grep "evictions" | awk '{print $3}' | head -n1)
         fi
     fi
     
@@ -657,6 +723,30 @@ get_memcached_details() {
             details="$details, Max Connections: $connections"
         else
             details="Max Connections: $connections"
+        fi
+    fi
+    
+    if [ -n "$curr_connections" ] && [ "$curr_connections" != "0" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Current Connections: $curr_connections"
+        else
+            details="Current Connections: $curr_connections"
+        fi
+    fi
+    
+    if [ -n "$total_connections" ] && [ "$total_connections" != "0" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Total Connections: $total_connections"
+        else
+            details="Total Connections: $total_connections"
+        fi
+    fi
+    
+    if [ -n "$evictions" ] && [ "$evictions" != "0" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Evictions: $evictions"
+        else
+            details="Evictions: $evictions"
         fi
     fi
     
@@ -1135,10 +1225,21 @@ check_locale_requirements() {
     local lc_all="${LC_ALL:-not set}"
     log "Current locale settings: LANGUAGE=$language, LC_TIME=$lc_time, LC_ALL=$lc_all"
     
-    # Check critical locales
-    if ! check_locale "en_US.UTF-8" "en_US.UTF-8 (critical for date parsing)"; then
-        missing=1
-        MISSING_CRITICAL+=("Locales|en_US.UTF-8|$(get_install_hint 'locale-en' 'en_US.UTF-8')")
+    # Check critical locales - check for any en_US variant
+    local en_us_found=0
+    local en_us_variants=("en_US.UTF-8" "en_US.utf8" "en_US")
+    
+    for variant in "${en_us_variants[@]}"; do
+        if locale_has "$variant"; then
+            log "✅ Locale $variant: available"
+            en_us_found=1
+            break
+        fi
+    done
+    
+    if [ "$en_us_found" -eq 0 ]; then
+        log_warning "No en_US locale variant found - date parsing may be unpredictable"
+        MISSING_RECOMMENDED+=("Locales|en_US.UTF-8|$(get_install_hint 'locale-en' 'en_US.UTF-8')")
     fi
     
     if ! check_locale "ru_RU.UTF-8" "ru_RU.UTF-8 (recommended for Russian dates)"; then
@@ -1230,18 +1331,47 @@ check_php_requirements() {
         fi
     fi
     
-    # Check PHP extensions
-    local extensions=("mysqli" "pdo_mysql" "redis" "opcache" "json")
-    for ext in "${extensions[@]}"; do
+    # Check PHP extensions - special handling for mysqli/pdo_mysql
+    local mysqli_found=0
+    local pdo_mysql_found=0
+    
+    # Check mysqli
+    if php -m | grep -q "^mysqli$"; then
+        log "✅ PHP extension: mysqli"
+        mysqli_found=1
+    else
+        log "❌ PHP extension: mysqli (not loaded)"
+    fi
+    
+    # Check pdo_mysql
+    if php -m | grep -q "^pdo_mysql$"; then
+        log "✅ PHP extension: pdo_mysql"
+        pdo_mysql_found=1
+    else
+        log "❌ PHP extension: pdo_mysql (not loaded)"
+    fi
+    
+    # Check if at least one MySQL extension is available
+    if [ "$mysqli_found" -eq 0 ] && [ "$pdo_mysql_found" -eq 0 ]; then
+        log "❌ No MySQL PHP extensions found - at least one is required"
+        missing=1
+        MISSING_CRITICAL+=("PHP Extensions|mysqli or pdo_mysql|$(get_install_hint 'php-mysql' 'mysqli or pdo_mysql')")
+    elif [ "$mysqli_found" -eq 1 ] && [ "$pdo_mysql_found" -eq 0 ]; then
+        log_warning "Only mysqli found - consider adding pdo_mysql for better compatibility"
+        MISSING_RECOMMENDED+=("PHP Extensions|pdo_mysql|$(get_install_hint 'php-mysql' 'pdo_mysql')")
+    elif [ "$mysqli_found" -eq 0 ] && [ "$pdo_mysql_found" -eq 1 ]; then
+        log_warning "Only pdo_mysql found - consider adding mysqli for better compatibility"
+        MISSING_RECOMMENDED+=("PHP Extensions|mysqli|$(get_install_hint 'php-mysql' 'mysqli')")
+    fi
+    
+    # Check other extensions
+    local other_extensions=("redis" "opcache" "json")
+    for ext in "${other_extensions[@]}"; do
         if php -m | grep -q "^$ext$"; then
             log "✅ PHP extension: $ext"
         else
             log "❌ PHP extension: $ext (not loaded)"
-            missing=1
             case "$ext" in
-                "mysqli"|"pdo_mysql")
-                    MISSING_CRITICAL+=("PHP Extensions|$ext|$(get_install_hint 'php-mysql' '$ext')")
-                    ;;
                 "redis")
                     MISSING_RECOMMENDED+=("PHP Extensions|$ext|$(get_install_hint 'php-redis' '$ext')")
                     ;;
@@ -1249,13 +1379,162 @@ check_php_requirements() {
                     MISSING_RECOMMENDED+=("PHP Extensions|$ext|$(get_install_hint 'php-opcache' '$ext')")
                     ;;
                 "json")
+                    missing=1
                     MISSING_CRITICAL+=("PHP Extensions|$ext|$(get_install_hint 'php-mysql' '$ext')")
                     ;;
             esac
         fi
     done
     
+    # Additional PHP extension checks for cache services
+    check_php_memcache_extensions
+    check_php_redis_extension
+    
+    # Analyze PHP cache settings
+    analyze_php_cache_settings
+    
     return $missing
+}
+
+# Check PHP memcache/memcached extensions
+check_php_memcache_extensions() {
+    log "=== PHP Memcache Extensions ==="
+    local missing=0
+    
+    # Check if memcached service is running
+    local memcached_running=0
+    if systemctl is-active memcached >/dev/null 2>&1; then
+        memcached_running=1
+        log "✅ Memcached service: running"
+    else
+        log "ℹ️ Memcached service: not running - skipping PHP extension checks"
+        return 0
+    fi
+    
+    # Check PHP extensions
+    local memcache_found=0
+    local memcached_found=0
+    
+    # Check memcache extension
+    if php -m | grep -q "^memcache$"; then
+        log "✅ PHP extension: memcache"
+        memcache_found=1
+    else
+        log "❌ PHP extension: memcache (not loaded)"
+    fi
+    
+    # Check memcached extension
+    if php -m | grep -q "^memcached$"; then
+        log "✅ PHP extension: memcached"
+        memcached_found=1
+    else
+        log "❌ PHP extension: memcached (not loaded)"
+    fi
+    
+    # Check for conflicts and recommendations
+    if [ "$memcache_found" -eq 1 ] && [ "$memcached_found" -eq 1 ]; then
+        log_warning "Both memcache and memcached extensions loaded - potential conflict"
+        MISSING_RECOMMENDED+=("PHP Extensions|memcache/memcached conflict|Consider using only one memcache extension")
+    elif [ "$memcache_found" -eq 0 ] && [ "$memcached_found" -eq 0 ]; then
+        log_warning "No memcache PHP extensions found - memcached service is running"
+        MISSING_RECOMMENDED+=("PHP Extensions|memcache or memcached|$(get_install_hint 'php-memcache' 'memcache or memcached')")
+    elif [ "$memcache_found" -eq 1 ] && [ "$memcached_found" -eq 0 ]; then
+        log "ℹ️ Using memcache extension (older, consider upgrading to memcached)"
+        MISSING_RECOMMENDED+=("PHP Extensions|memcached|$(get_install_hint 'php-memcached' 'memcached')")
+    elif [ "$memcache_found" -eq 0 ] && [ "$memcached_found" -eq 1 ]; then
+        log "✅ Using memcached extension (recommended)"
+    fi
+    
+    return $missing
+}
+
+# Check PHP redis extension
+check_php_redis_extension() {
+    log "=== PHP Redis Extension ==="
+    local missing=0
+    
+    # Check if redis service is running
+    local redis_running=0
+    if systemctl is-active redis >/dev/null 2>&1 || systemctl is-active redis-server >/dev/null 2>&1; then
+        redis_running=1
+        log "✅ Redis service: running"
+    else
+        log "ℹ️ Redis service: not running - skipping PHP extension check"
+        return 0
+    fi
+    
+    # Check redis extension
+    if php -m | grep -q "^redis$"; then
+        log "✅ PHP extension: redis"
+    else
+        log "❌ PHP extension: redis (not loaded)"
+        MISSING_RECOMMENDED+=("PHP Extensions|redis|$(get_install_hint 'php-redis' 'redis')")
+    fi
+    
+    return $missing
+}
+
+# Analyze PHP cache settings
+analyze_php_cache_settings() {
+    log "=== PHP Cache Settings Analysis ==="
+    
+    # Get session save handler
+    local session_handler
+    session_handler=$(php -r "echo ini_get('session.save_handler');" 2>/dev/null || echo "unknown")
+    log "Session save handler: $session_handler"
+    
+    # Get session save path
+    local session_path
+    session_path=$(php -r "echo ini_get('session.save_path');" 2>/dev/null || echo "unknown")
+    log "Session save path: $session_path"
+    
+    # Check if session handler matches running services
+    case "$session_handler" in
+        "memcache"|"memcached")
+            if ! systemctl is-active memcached >/dev/null 2>&1; then
+                log_warning "Session handler set to $session_handler but memcached service is not running"
+                MISSING_RECOMMENDED+=("PHP Settings|session.save_handler|Memcached service not running but handler is $session_handler")
+            else
+                log "✅ Session handler $session_handler matches running memcached service"
+            fi
+            ;;
+        "redis")
+            if ! systemctl is-active redis >/dev/null 2>&1 && ! systemctl is-active redis-server >/dev/null 2>&1; then
+                log_warning "Session handler set to redis but redis service is not running"
+                MISSING_RECOMMENDED+=("PHP Settings|session.save_handler|Redis service not running but handler is redis")
+            else
+                log "✅ Session handler redis matches running redis service"
+            fi
+            ;;
+        "files")
+            log "ℹ️ Using file-based session storage"
+            ;;
+        *)
+            log "ℹ️ Session handler: $session_handler"
+            ;;
+    esac
+    
+    # Check memcache-specific settings
+    if [ "$session_handler" = "memcache" ] || [ "$session_handler" = "memcached" ]; then
+        local hash_strategy
+        hash_strategy=$(php -r "echo ini_get('memcache.hash_strategy');" 2>/dev/null || echo "not set")
+        log "Memcache hash strategy: $hash_strategy"
+        
+        local session_redundancy
+        session_redundancy=$(php -r "echo ini_get('memcache.session_redundancy');" 2>/dev/null || echo "not set")
+        log "Memcache session redundancy: $session_redundancy"
+    fi
+    
+    # Check redis-specific settings
+    if [ "$session_handler" = "redis" ]; then
+        local redis_locking
+        redis_locking=$(php -r "echo ini_get('redis.session.locking_enabled');" 2>/dev/null || echo "not set")
+        log "Redis session locking: $redis_locking"
+        
+        local redis_lock_expire
+        redis_lock_expire=$(php -r "echo ini_get('redis.session.lock_expire');" 2>/dev/null || echo "not set")
+        log "Redis session lock expire: $redis_lock_expire"
+    fi
 }
 
 # Check Nginx requirements
