@@ -57,6 +57,46 @@ EXAMPLES:
 EOF
 }
 
+# Global arrays for tracking installation results
+declare -g -A INSTALLED_PACKAGES=()  # package -> version
+declare -g -A INSTALL_STATUS=()       # package -> status (installed/upgraded/skipped/failed)
+declare -g INSTALL_COUNTERS=(0 0 0 0) # installed, upgraded, skipped, failed
+
+# Helper function to track package installation
+track_package_install() {
+    local package="$1"
+    local status="$2"
+    local version="$3"
+    
+    INSTALLED_PACKAGES["$package"]="$version"
+    INSTALL_STATUS["$package"]="$status"
+    
+    case "$status" in
+        "installed") ((INSTALL_COUNTERS[0]++)) ;;
+        "upgraded") ((INSTALL_COUNTERS[1]++)) ;;
+        "skipped") ((INSTALL_COUNTERS[2]++)) ;;
+        "failed") ((INSTALL_COUNTERS[3]++)) ;;
+    esac
+}
+
+# Helper function to get package version
+get_package_version() {
+    local package="$1"
+    local pkg_manager="$2"
+    
+    case "$pkg_manager" in
+        "apt-get")
+            apt list --installed 2>/dev/null | grep "^$package/" | awk '{print $2}' | head -n1
+            ;;
+        "yum"|"dnf")
+            rpm -q "$package" 2>/dev/null | sed 's/.*-//' | head -n1
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
 # Install Percona Toolkit based on distribution
 install_percona_toolkit() {
     local distro_id="$1"
@@ -65,8 +105,24 @@ install_percona_toolkit() {
     
     case "$distro_id" in
         "ubuntu"|"debian")
-            # Для Debian/Ubuntu - через apt
-            apt-get install -y percona-toolkit
+            # Check if already installed
+            local pt_version_before
+            pt_version_before=$(get_package_version "percona-toolkit" "apt-get")
+            
+            if [ -n "$pt_version_before" ] && [ "$pt_version_before" != "unknown" ]; then
+                log_info "Percona Toolkit already installed (version: $pt_version_before)"
+                track_package_install "percona-toolkit" "skipped" "$pt_version_before"
+            else
+                if apt-get install -y percona-toolkit; then
+                    local pt_version_after
+                    pt_version_after=$(get_package_version "percona-toolkit" "apt-get")
+                    log_success "Percona Toolkit installed successfully (version: $pt_version_after)"
+                    track_package_install "percona-toolkit" "installed" "$pt_version_after"
+                else
+                    log_error "Failed to install Percona Toolkit"
+                    track_package_install "percona-toolkit" "failed" "unknown"
+                fi
+            fi
             ;;
         "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
             # Установить репозиторий Percona
@@ -75,22 +131,48 @@ install_percona_toolkit() {
                 pkg_manager="yum"
             fi
             
-            # Установить percona-release
-            $pkg_manager install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
+            # Check if already installed
+            local pt_version_before
+            pt_version_before=$(get_package_version "percona-toolkit" "$pkg_manager")
             
-            # Включить репозиторий tools
-            percona-release enable tools release
-            
-            # Установить percona-toolkit
-            $pkg_manager install -y percona-toolkit
+            if [ -n "$pt_version_before" ] && [ "$pt_version_before" != "unknown" ]; then
+                log_info "Percona Toolkit already installed (version: $pt_version_before)"
+                track_package_install "percona-toolkit" "skipped" "$pt_version_before"
+            else
+                log_info "Installing Percona repository..."
+                if $pkg_manager install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm; then
+                    log_success "Percona repository installed"
+                    
+                    log_info "Enabling tools repository..."
+                    if percona-release enable tools release; then
+                        log_success "Tools repository enabled"
+                        
+                        log_info "Installing percona-toolkit..."
+                        if $pkg_manager install -y percona-toolkit; then
+                            local pt_version_after
+                            pt_version_after=$(get_package_version "percona-toolkit" "$pkg_manager")
+                            log_success "Percona Toolkit installed successfully (version: $pt_version_after)"
+                            track_package_install "percona-toolkit" "installed" "$pt_version_after"
+                        else
+                            log_error "Failed to install percona-toolkit package"
+                            track_package_install "percona-toolkit" "failed" "unknown"
+                        fi
+                    else
+                        log_error "Failed to enable tools repository"
+                        track_package_install "percona-toolkit" "failed" "unknown"
+                    fi
+                else
+                    log_error "Failed to install Percona repository"
+                    track_package_install "percona-toolkit" "failed" "unknown"
+                fi
+            fi
             ;;
         *)
             log_warning "Unsupported distribution for Percona Toolkit: $distro_id"
+            track_package_install "percona-toolkit" "failed" "unsupported"
             return 1
             ;;
     esac
-    
-    log_success "Percona Toolkit installed successfully"
 }
 
 # Check for vulnerable packages before installation
@@ -106,25 +188,31 @@ check_package_vulnerabilities() {
         "ubuntu"|"debian")
             # Check with apt
             if command -v apt >/dev/null 2>&1; then
+                log_info "Checking security updates with apt..."
                 local security_updates
                 security_updates=$(apt list --upgradable 2>/dev/null | grep -i security | wc -l)
                 if [ "$security_updates" -gt 0 ]; then
                     log_warning "Found $security_updates security updates available"
                     apt list --upgradable 2>/dev/null | grep -i security | head -n 10
                 else
-                    log "No security updates found"
+                    log_success "No security updates found via apt"
                 fi
+            else
+                log_warning "apt command not available for security check"
             fi
             
             # Check with debsecan if available
             if command -v debsecan >/dev/null 2>&1; then
+                log_info "Checking CVEs with debsecan..."
                 local cve_count
                 cve_count=$(debsecan 2>/dev/null | wc -l)
                 if [ "$cve_count" -gt 0 ]; then
                     log_warning "Found $cve_count CVEs via debsecan"
                 else
-                    log "No CVEs found via debsecan"
+                    log_success "No CVEs found via debsecan"
                 fi
+            else
+                log_info "debsecan not available (optional tool)"
             fi
             ;;
             
@@ -135,17 +223,39 @@ check_package_vulnerabilities() {
                 pkg_manager="yum"
             fi
             
+            log_info "Checking security updates with $pkg_manager..."
+            
+            # Check if updateinfo command works
+            if ! $pkg_manager updateinfo list 2>/dev/null | head -n1 | grep -q "updateinfo"; then
+                log_warning "$pkg_manager updateinfo not available - security check limited"
+                log_info "Consider installing yum-plugin-security for detailed security analysis"
+                return 0
+            fi
+            
             # Check security updates
             local security_updates
-            security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -cE "^(Critical|Important)")
+            security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -cE "^(Critical|Important)" || echo "0")
+            
             if [ "$security_updates" -gt 0 ]; then
                 log_warning "Found $security_updates critical/important security updates"
                 $pkg_manager updateinfo list security 2>/dev/null | grep -E "^(Critical|Important)" | head -n 10
             else
-                log "No critical/important security updates found"
+                log_success "No critical/important security updates found"
+            fi
+            
+            # Additional check for all security updates
+            local all_security_updates
+            all_security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -c "^[A-Z]" || echo "0")
+            if [ "$all_security_updates" -gt 0 ]; then
+                log_info "Total security updates available: $all_security_updates"
             fi
             ;;
+        *)
+            log_warning "Unknown distribution: $distro_id - skipping vulnerability check"
+            ;;
     esac
+    
+    log_info "Vulnerability check completed"
 }
 
 # Auto-install missing packages
@@ -189,18 +299,68 @@ auto_install_packages() {
     # Установка EPEL для RHEL-family
     if [[ "$distro_id" =~ ^(almalinux|rocky|centos|rhel|fedora)$ ]]; then
         log_info "Installing EPEL repository..."
-        $pkg_manager install -y epel-release
+        
+        # Check if EPEL is already installed
+        local epel_version_before
+        epel_version_before=$(get_package_version "epel-release" "$pkg_manager")
+        
+        if [ -n "$epel_version_before" ] && [ "$epel_version_before" != "unknown" ]; then
+            log_info "EPEL repository already installed (version: $epel_version_before)"
+            track_package_install "epel-release" "skipped" "$epel_version_before"
+        else
+            if $pkg_manager install -y epel-release; then
+                local epel_version_after
+                epel_version_after=$(get_package_version "epel-release" "$pkg_manager")
+                log_success "EPEL repository installed successfully (version: $epel_version_after)"
+                track_package_install "epel-release" "installed" "$epel_version_after"
+            else
+                log_error "Failed to install EPEL repository"
+                track_package_install "epel-release" "failed" "unknown"
+            fi
+        fi
     fi
     
     # Установка основных пакетов
     log_info "Installing main packages..."
     case "$distro_id" in
         "ubuntu"|"debian")
+            log_info "Updating package lists..."
             apt-get update
-            apt-get install -y $packages_debian
+            
+            log_info "Installing packages: $packages_debian"
+            if apt-get install -y $packages_debian; then
+                log_success "Main packages installed successfully"
+                # Track each package individually
+                for package in $packages_debian; do
+                    local version
+                    version=$(get_package_version "$package" "$pkg_manager")
+                    track_package_install "$package" "installed" "$version"
+                done
+            else
+                log_error "Failed to install some main packages"
+                # Track failed packages
+                for package in $packages_debian; do
+                    track_package_install "$package" "failed" "unknown"
+                done
+            fi
             ;;
         "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
-            $pkg_manager install -y $packages_rhel
+            log_info "Installing packages: $packages_rhel"
+            if $pkg_manager install -y $packages_rhel; then
+                log_success "Main packages installed successfully"
+                # Track each package individually
+                for package in $packages_rhel; do
+                    local version
+                    version=$(get_package_version "$package" "$pkg_manager")
+                    track_package_install "$package" "installed" "$version"
+                done
+            else
+                log_error "Failed to install some main packages"
+                # Track failed packages
+                for package in $packages_rhel; do
+                    track_package_install "$package" "failed" "unknown"
+                done
+            fi
             ;;
     esac
     
@@ -211,10 +371,24 @@ auto_install_packages() {
     log_info "Checking and applying security updates..."
     case "$distro_id" in
         "ubuntu"|"debian")
-            apt-get upgrade -y --security
+            log_info "Applying security updates with apt..."
+            if apt-get upgrade -y --security; then
+                log_success "Security updates applied successfully"
+                track_package_install "security-updates" "installed" "latest"
+            else
+                log_warning "Some security updates may have failed"
+                track_package_install "security-updates" "failed" "partial"
+            fi
             ;;
         "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
-            $pkg_manager update -y --security
+            log_info "Applying security updates with $pkg_manager..."
+            if $pkg_manager update -y --security; then
+                log_success "Security updates applied successfully"
+                track_package_install "security-updates" "installed" "latest"
+            else
+                log_warning "Some security updates may have failed"
+                track_package_install "security-updates" "failed" "partial"
+            fi
             ;;
     esac
     
@@ -251,18 +425,117 @@ auto_install_packages() {
     # Install testssl.sh manually
     if ! command -v testssl.sh >/dev/null 2>&1; then
         log_info "Installing testssl.sh..."
-        curl -o /usr/local/bin/testssl.sh https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh
-        chmod +x /usr/local/bin/testssl.sh
-        log_success "testssl.sh installed successfully"
+        if curl -o /usr/local/bin/testssl.sh https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh; then
+            if chmod +x /usr/local/bin/testssl.sh; then
+                log_success "testssl.sh installed successfully"
+                track_package_install "testssl.sh" "installed" "latest"
+            else
+                log_error "Failed to make testssl.sh executable"
+                track_package_install "testssl.sh" "failed" "unknown"
+            fi
+        else
+            log_error "Failed to download testssl.sh"
+            track_package_install "testssl.sh" "failed" "unknown"
+        fi
+    else
+        log_info "testssl.sh already installed"
+        track_package_install "testssl.sh" "skipped" "existing"
     fi
     
     # Вызвать setup_monitoring.sh для настройки мониторинга
     if [ -f "$SCRIPT_DIR/setup_monitoring.sh" ]; then
         log_info "Running monitoring setup script..."
-        bash "$SCRIPT_DIR/setup_monitoring.sh" --non-interactive
+        if bash "$SCRIPT_DIR/setup_monitoring.sh" --non-interactive; then
+            log_success "Monitoring setup completed"
+            track_package_install "monitoring-setup" "installed" "configured"
+        else
+            log_warning "Monitoring setup had issues"
+            track_package_install "monitoring-setup" "failed" "partial"
+        fi
     fi
     
+    # Generate installation summary
+    generate_install_summary
+    
     log_success "Auto-installation completed successfully"
+}
+
+# Generate installation summary report
+generate_install_summary() {
+    log_info "=== Installation Summary ==="
+    
+    local total_packages=${#INSTALLED_PACKAGES[@]}
+    local installed_count=${INSTALL_COUNTERS[0]}
+    local upgraded_count=${INSTALL_COUNTERS[1]}
+    local skipped_count=${INSTALL_COUNTERS[2]}
+    local failed_count=${INSTALL_COUNTERS[3]}
+    
+    if [ "$total_packages" -eq 0 ]; then
+        log_warning "No packages were tracked during installation"
+        return 0
+    fi
+    
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "Package              Version       Status"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Sort packages by name for consistent output
+    local sorted_packages=($(printf '%s\n' "${!INSTALLED_PACKAGES[@]}" | sort))
+    
+    for package in "${sorted_packages[@]}"; do
+        local version="${INSTALLED_PACKAGES[$package]}"
+        local status="${INSTALL_STATUS[$package]}"
+        
+        # Format status with appropriate color/symbol
+        case "$status" in
+            "installed") status_symbol="✅ installed" ;;
+            "upgraded") status_symbol="🔄 upgraded" ;;
+            "skipped") status_symbol="⏭️  skipped" ;;
+            "failed") status_symbol="❌ failed" ;;
+            *) status_symbol="❓ $status" ;;
+        esac
+        
+        # Truncate long package names and versions for table formatting
+        local package_display="$package"
+        local version_display="$version"
+        
+        if [ ${#package_display} -gt 20 ]; then
+            package_display="${package_display:0:17}..."
+        fi
+        
+        if [ ${#version_display} -gt 12 ]; then
+            version_display="${version_display:0:9}..."
+        fi
+        
+        printf "%-20s %-12s %s\n" "$package_display" "$version_display" "$status_symbol"
+    done
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Total packages processed: $total_packages"
+    echo "Successfully installed: $installed_count"
+    echo "Upgraded: $upgraded_count"
+    echo "Skipped (already installed): $skipped_count"
+    echo "Failed: $failed_count"
+    echo ""
+    
+    # Recommendations based on results
+    if [ "$failed_count" -gt 0 ]; then
+        log_warning "Some packages failed to install. Check the logs above for details."
+        log_info "You may need to install them manually or check repository availability."
+    fi
+    
+    if [ "$installed_count" -gt 0 ] || [ "$upgraded_count" -gt 0 ]; then
+        log_success "Installation completed successfully!"
+        log_info "You can now run the audit scripts with improved functionality."
+    fi
+    
+    if [ "$skipped_count" -gt 0 ]; then
+        log_info "Some packages were already installed and up-to-date."
+    fi
+    
+    echo ""
 }
 
 # Default settings
