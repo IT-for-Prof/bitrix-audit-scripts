@@ -1219,18 +1219,23 @@ check_security_tools() {
     # Check yum-plugin-security (RHEL-family only)
     case "$distro_id" in
         "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
-            # Для dnf встроенная поддержка, проверка не нужна
+            # Для dnf встроенная поддержка
             if command -v dnf >/dev/null 2>&1; then
                 log "✅ dnf has built-in security updates support"
             elif command -v yum >/dev/null 2>&1; then
-                # Только для старых систем с yum
+                # Для старых систем с yum проверяем плагин
                 if rpm -q yum-plugin-security >/dev/null 2>&1; then
                     log "✅ yum-plugin-security: installed"
                 else
-                    log_warning "yum-plugin-security not found - security updates analysis will be limited"
-                    log "  Install: yum install yum-plugin-security"
-                    echo ""
-                    missing=1
+                    # Проверяем, работает ли updateinfo без плагина
+                    if yum updateinfo list 2>/dev/null | grep -q "updateinfo"; then
+                        log "✅ yum updateinfo: working"
+                    else
+                        log_warning "yum-plugin-security not found - security updates analysis will be limited"
+                        log "  Install: yum install yum-plugin-security"
+                        echo ""
+                        missing=1
+                    fi
                 fi
             fi
             ;;
@@ -1275,6 +1280,8 @@ check_security_tools() {
         echo ""
         missing=1
     fi
+    
+    echo ""  # Разрыв перед итоговым сообщением
     
     if [ "$missing" -eq 0 ]; then
         log "✅ All security tools are available"
@@ -1695,6 +1702,8 @@ main() {
         
         echo ""
         log "=== Auto-Install Mode ==="
+        log "Missing components: $total_missing issues found"
+        echo ""
         
         if [ "$NON_INTERACTIVE" -eq 0 ]; then
             read -p "Install missing packages automatically? [Y/n]: " answer
@@ -1708,8 +1717,7 @@ main() {
         auto_install_packages
         
         echo ""
-        log "=== Re-checking requirements after installation ==="
-        # Повторная проверка после установки
+        log "=== Installation completed. Re-checking requirements ==="
         exec "$0" --module all
     fi
     
