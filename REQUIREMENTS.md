@@ -374,6 +374,130 @@ WantedBy=multi-user.target
 audit_user ALL=(ALL) NOPASSWD: /path/to/Audit-Bitrix24/*
 ```
 
+## Автоматическая установка и настройка
+
+### Быстрый старт
+
+Для автоматической проверки и установки всех недостающих пакетов:
+
+```bash
+sudo ./check_requirements.sh --install
+```
+
+Для неинтерактивной установки (без подтверждений):
+
+```bash
+sudo ./check_requirements.sh --install --non-interactive
+```
+
+### Детальная настройка мониторинга
+
+Для автоматической установки и настройки только инструментов мониторинга:
+
+```bash
+sudo ./setup_monitoring.sh
+```
+
+Опции setup_monitoring.sh:
+- `--non-interactive` - запуск без интерактивных подтверждений
+- `--force` - принудительная переустановка
+- `--verbose` - подробный вывод
+
+### Что устанавливается автоматически
+
+#### Основные пакеты (для всех дистрибутивов):
+- **jq** - JSON парсер для работы с API
+- **curl, wget** - HTTP клиенты для API запросов
+- **lynis** - комплексный аудит безопасности
+- **tuned** - оптимизация производительности системы
+- **mysqltuner** - анализатор конфигурации MySQL
+- **percona-toolkit** - расширенные инструменты для MySQL
+- **gnuplot** - генерация графиков
+- **sysbench** - бенчмаркинг
+
+#### Инструменты мониторинга:
+- **sysstat** - системный монитор (sar, iostat, vmstat)
+  - Настройка: 30-секундные интервалы, хранение 7 дней
+- **atop** - расширенный системный монитор
+  - Настройка: 30-секундные интервалы, хранение 7 дней
+- **psacct/acct** - учет процессов
+
+#### Особенности установки Percona Toolkit:
+
+**Debian/Ubuntu:**
+```bash
+apt-get install percona-toolkit
+```
+
+**RHEL-family (AlmaLinux/Rocky/CentOS/RHEL):**
+```bash
+# Автоматическая установка репозитория Percona
+dnf install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
+percona-release enable tools release
+dnf install -y percona-toolkit
+```
+
+Для старых дистрибутивов (без dnf) автоматически используется yum.
+
+### Проверка безопасности и уязвимостей
+
+При автоматической установке выполняется:
+
+1. **Проверка уязвимых пакетов** перед установкой
+2. **Установка инструментов безопасности**:
+   - lynis - комплексный аудит безопасности
+   - debsecan - сканер CVE для Debian/Ubuntu
+   - dnf-plugin-security / yum-plugin-security - для RHEL-family
+3. **Применение обновлений безопасности** после установки пакетов
+
+#### Debian/Ubuntu:
+```bash
+# Проверка уязвимостей
+apt list --upgradable | grep -i security
+debsecan
+
+# Применение обновлений безопасности
+apt-get upgrade --security
+```
+
+#### RHEL-family (AlmaLinux/Rocky/CentOS):
+```bash
+# Проверка уязвимостей
+dnf updateinfo list security
+
+# Применение обновлений безопасности  
+dnf update --security
+```
+
+#### Автоматическая проверка:
+
+Скрипты аудита автоматически проверяют уязвимости через:
+- `collect_system_info.sh` - анализирует установленные пакеты
+- Функции: `check_vulnerable_packages_apt()`, `check_vulnerable_packages_yum()`
+- Интеграция с debsecan, dnf updateinfo, yum-plugin-security
+
+#### Рекомендации:
+
+- Регулярно запускайте полный аудит: `./run_all_audits.sh --all`
+- Настройте автоматические обновления безопасности
+- Используйте lynis для глубокого анализа: `lynis audit system`
+- Мониторьте CVE базы данных для критичных компонентов
+
+### Проверка установки
+
+После установки проверьте требования:
+
+```bash
+./check_requirements.sh --verbose
+```
+
+Для проверки конкретного модуля:
+
+```bash
+./check_requirements.sh --module tools --verbose
+./check_requirements.sh --module security --verbose
+```
+
 ## Проверка требований
 
 ### Автоматическая проверка

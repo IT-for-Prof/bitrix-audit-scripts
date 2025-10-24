@@ -26,6 +26,8 @@ Usage: $0 [OPTIONS]
 OPTIONS:
     --module MODULE          Check requirements for specific module
     --verbose, -v            Enable verbose output
+    --install                Automatically install missing packages
+    --non-interactive        Run without user prompts (for --install)
     --help, -h               Show this help
 
 MODULES:
@@ -49,13 +51,187 @@ EXAMPLES:
     $0 --module nginx        # Check only nginx requirements
     $0 --verbose             # Check all requirements with verbose output
     $0 --module tools --verbose # Check additional tools with verbose output
+    $0 --install             # Auto-install missing packages
+    $0 --install --non-interactive # Auto-install without prompts
 
 EOF
+}
+
+# Install Percona Toolkit based on distribution
+install_percona_toolkit() {
+    local distro_id="$1"
+    
+    log_info "Installing Percona Toolkit..."
+    
+    case "$distro_id" in
+        "ubuntu"|"debian")
+            # Для Debian/Ubuntu - через apt
+            apt-get install -y percona-toolkit
+            ;;
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            # Установить репозиторий Percona
+            local pkg_manager="dnf"
+            if ! command -v dnf >/dev/null 2>&1; then
+                pkg_manager="yum"
+            fi
+            
+            # Установить percona-release
+            $pkg_manager install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
+            
+            # Включить репозиторий tools
+            percona-release enable tools release
+            
+            # Установить percona-toolkit
+            $pkg_manager install -y percona-toolkit
+            ;;
+        *)
+            log_warning "Unsupported distribution for Percona Toolkit: $distro_id"
+            return 1
+            ;;
+    esac
+    
+    log_success "Percona Toolkit installed successfully"
+}
+
+# Check for vulnerable packages before installation
+check_package_vulnerabilities() {
+    log "=== Checking for vulnerable packages ==="
+    
+    local distro_id=""
+    if [ -f /etc/os-release ]; then
+        distro_id=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
+    
+    case "$distro_id" in
+        "ubuntu"|"debian")
+            # Check with apt
+            if command -v apt >/dev/null 2>&1; then
+                local security_updates
+                security_updates=$(apt list --upgradable 2>/dev/null | grep -i security | wc -l)
+                if [ "$security_updates" -gt 0 ]; then
+                    log_warning "Found $security_updates security updates available"
+                    apt list --upgradable 2>/dev/null | grep -i security | head -n 10
+                else
+                    log "No security updates found"
+                fi
+            fi
+            
+            # Check with debsecan if available
+            if command -v debsecan >/dev/null 2>&1; then
+                local cve_count
+                cve_count=$(debsecan 2>/dev/null | wc -l)
+                if [ "$cve_count" -gt 0 ]; then
+                    log_warning "Found $cve_count CVEs via debsecan"
+                else
+                    log "No CVEs found via debsecan"
+                fi
+            fi
+            ;;
+            
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            # Determine package manager with fallback
+            local pkg_manager="dnf"
+            if ! command -v dnf >/dev/null 2>&1; then
+                pkg_manager="yum"
+            fi
+            
+            # Check security updates
+            local security_updates
+            security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -cE "^(Critical|Important)")
+            if [ "$security_updates" -gt 0 ]; then
+                log_warning "Found $security_updates critical/important security updates"
+                $pkg_manager updateinfo list security 2>/dev/null | grep -E "^(Critical|Important)" | head -n 10
+            else
+                log "No critical/important security updates found"
+            fi
+            ;;
+    esac
+}
+
+# Auto-install missing packages
+auto_install_packages() {
+    local distro_id=""
+    local pkg_manager=""
+    
+    # Определить дистрибутив
+    if [ -f /etc/os-release ]; then
+        distro_id=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
+    
+    # Определить пакетный менеджер с фолбэком
+    case "$distro_id" in
+        "ubuntu"|"debian")
+            pkg_manager="apt-get"
+            ;;
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            if command -v dnf >/dev/null 2>&1; then
+                pkg_manager="dnf"
+            else
+                pkg_manager="yum"
+            fi
+            ;;
+        *)
+            log_error "Unsupported distribution: $distro_id"
+            return 1
+            ;;
+    esac
+    
+    log_info "Detected distribution: $distro_id"
+    log_info "Using package manager: $pkg_manager"
+    
+    # Список пакетов для установки по дистрибутивам
+    local packages_debian="jq lynis tuned mysqltuner gnuplot sysbench sysstat atop psmisc curl wget debsecan"
+    local packages_rhel="jq lynis tuned mysqltuner gnuplot sysbench sysstat atop psmisc curl wget"
+    
+    # Проверка уязвимостей перед установкой
+    check_package_vulnerabilities
+    
+    # Установка EPEL для RHEL-family
+    if [[ "$distro_id" =~ ^(almalinux|rocky|centos|rhel|fedora)$ ]]; then
+        log_info "Installing EPEL repository..."
+        $pkg_manager install -y epel-release
+    fi
+    
+    # Установка основных пакетов
+    log_info "Installing main packages..."
+    case "$distro_id" in
+        "ubuntu"|"debian")
+            apt-get update
+            apt-get install -y $packages_debian
+            ;;
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            $pkg_manager install -y $packages_rhel
+            ;;
+    esac
+    
+    # Установка Percona Toolkit
+    install_percona_toolkit "$distro_id"
+    
+    # Apply security updates if available
+    log_info "Checking and applying security updates..."
+    case "$distro_id" in
+        "ubuntu"|"debian")
+            apt-get upgrade -y --security
+            ;;
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            $pkg_manager update -y --security
+            ;;
+    esac
+    
+    # Вызвать setup_monitoring.sh для настройки мониторинга
+    if [ -f "$SCRIPT_DIR/setup_monitoring.sh" ]; then
+        log_info "Running monitoring setup script..."
+        bash "$SCRIPT_DIR/setup_monitoring.sh" --non-interactive
+    fi
+    
+    log_success "Auto-installation completed successfully"
 }
 
 # Default settings
 VERBOSE=0
 MODULE=""
+AUTO_INSTALL=0
+NON_INTERACTIVE=0
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -67,6 +243,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --verbose|-v)
             VERBOSE=1
+            shift
+            ;;
+        --install)
+            AUTO_INSTALL=1
+            shift
+            ;;
+        --non-interactive)
+            NON_INTERACTIVE=1
             shift
             ;;
         --help|-h)
@@ -98,6 +282,14 @@ log_error() {
 
 log_warning() {
     echo "WARNING: $*" >&2
+}
+
+log_success() {
+    echo "✅ $*"
+}
+
+log_info() {
+    echo "ℹ️  $*"
 }
 
 # Get service ports
@@ -1054,7 +1246,7 @@ check_security_tools() {
     
     # Check jq (optional, common for all)
     if ! check_command "jq" "jq (JSON parser, optional)"; then
-        log_info "jq not found - JSON parsing will use basic methods"
+        log_warning "jq not found - JSON parsing will use basic methods"
         log "  Install: apt-get install jq (Debian/Ubuntu) or dnf install jq (RHEL-family)"
         echo ""
     fi
@@ -1082,7 +1274,7 @@ check_security_tools() {
     fi
     
     if [ "$missing" -eq 0 ]; then
-        log_success "All security tools are available"
+        log "✅ All security tools are available"
         return 0
     else
         log_warning "Some security tools are missing (optional but recommended)"
@@ -1311,6 +1503,17 @@ generate_installation_recommendations() {
     log "Detected distribution: $distro (version: $version)"
     echo
     
+    echo ""
+    log "=== Quick Auto-Install ==="
+    echo "  Run this script with --install flag to automatically install missing packages:"
+    echo "  sudo ./check_requirements.sh --install"
+    echo ""
+    echo "  Or use dedicated monitoring setup script:"
+    echo "  sudo ./setup_monitoring.sh --non-interactive"
+    echo ""
+    log "=== Manual Installation Commands ==="
+    echo ""
+    
     case "$distro" in
         "ubuntu"|"debian")
             log "Debian/Ubuntu installation commands:"
@@ -1463,6 +1666,33 @@ main() {
             total_missing=1
         fi
         echo
+    fi
+    
+    # Auto-install if requested
+    if [ "$AUTO_INSTALL" -eq 1 ]; then
+        if [ "$EUID" -ne 0 ]; then
+            log_error "Auto-install requires root privileges. Run with sudo."
+            exit 1
+        fi
+        
+        echo ""
+        log "=== Auto-Install Mode ==="
+        
+        if [ "$NON_INTERACTIVE" -eq 0 ]; then
+            read -p "Install missing packages automatically? [Y/n]: " answer
+            answer=${answer:-Y}
+            if [[ "$answer" == "n" || "$answer" == "N" ]]; then
+                log "Installation cancelled"
+                exit 0
+            fi
+        fi
+        
+        auto_install_packages
+        
+        echo ""
+        log "=== Re-checking requirements after installation ==="
+        # Повторная проверка после установки
+        exec "$0" --module all
     fi
     
     # Generate installation recommendations
