@@ -2050,6 +2050,8 @@ check_performance_requirements() {
 # Check security tools (optional)
 check_security_tools() {
     log "=== Security Tools Requirements (Optional) ==="
+    # Update command hash cache to ensure newly installed commands are found
+    hash -r 2>/dev/null || true
     local missing=0
     
     # Detect distribution type
@@ -2164,6 +2166,8 @@ check_security_tools() {
 # Check additional tools requirements
 check_additional_tools() {
     log "=== Additional Tools Requirements ==="
+    # Update command hash cache to ensure newly installed commands are found
+    hash -r 2>/dev/null || true
     local missing=0
     
     # MySQL tools
