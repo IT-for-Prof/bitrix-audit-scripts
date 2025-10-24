@@ -233,6 +233,122 @@ MODULE=""
 AUTO_INSTALL=0
 NON_INTERACTIVE=0
 
+# Arrays to track missing components
+declare -a MISSING_CRITICAL=()
+declare -a MISSING_RECOMMENDED=()
+
+# Global variables for distribution detection
+DISTRO_ID=""
+PKG_MANAGER=""
+
+# Detect distribution and package manager
+detect_distro() {
+    DISTRO_ID=""
+    PKG_MANAGER=""
+    
+    if [ -f /etc/os-release ]; then
+        DISTRO_ID=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
+    
+    case "$DISTRO_ID" in
+        "ubuntu"|"debian")
+            PKG_MANAGER="apt-get"
+            ;;
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            if command -v dnf >/dev/null 2>&1; then
+                PKG_MANAGER="dnf"
+            else
+                PKG_MANAGER="yum"
+            fi
+            ;;
+    esac
+}
+
+# Generate install hints based on distribution
+get_install_hint() {
+    local component_type="$1"
+    local component_name="$2"
+    
+    case "$component_type" in
+        "locale-en")
+            if [ "$PKG_MANAGER" = "apt-get" ]; then
+                echo "apt-get install locales && locale-gen en_US.UTF-8"
+            else
+                echo "dnf install glibc-langpack-en"
+            fi
+            ;;
+        "locale-ru")
+            if [ "$PKG_MANAGER" = "apt-get" ]; then
+                echo "apt-get install locales && locale-gen ru_RU.UTF-8"
+            else
+                echo "dnf install glibc-langpack-ru"
+            fi
+            ;;
+        "php-mysql")
+            if [ "$PKG_MANAGER" = "apt-get" ]; then
+                echo "apt-get install php-mysql"
+            else
+                echo "dnf install php-mysqlnd"
+            fi
+            ;;
+        "php-redis")
+            echo "$PKG_MANAGER install php-redis"
+            ;;
+        "php-opcache")
+            if [ "$PKG_MANAGER" = "apt-get" ]; then
+                echo "apt-get install php-opcache"
+            else
+                echo "Already included in php package"
+            fi
+            ;;
+        "mysqltuner")
+            echo "$PKG_MANAGER install mysqltuner"
+            ;;
+        "percona-toolkit")
+            if [ "$PKG_MANAGER" = "apt-get" ]; then
+                echo "apt-get install percona-toolkit"
+            else
+                echo "dnf install percona-toolkit (requires Percona repo)"
+            fi
+            ;;
+        "tuned")
+            echo "$PKG_MANAGER install tuned"
+            ;;
+        "sysbench")
+            echo "$PKG_MANAGER install sysbench"
+            ;;
+        "wkhtmltopdf")
+            if [ "$PKG_MANAGER" = "apt-get" ]; then
+                echo "apt-get install wkhtmltopdf"
+            else
+                echo "Manual install from wkhtmltopdf.org"
+            fi
+            ;;
+        "gnuplot")
+            echo "$PKG_MANAGER install gnuplot"
+            ;;
+        "testssl")
+            echo "Manual download from GitHub"
+            ;;
+        "lynis")
+            echo "$PKG_MANAGER install lynis"
+            ;;
+        "debsecan")
+            echo "apt-get install debsecan (Debian/Ubuntu only)"
+            ;;
+        "firewall")
+            if [ "$PKG_MANAGER" = "apt-get" ]; then
+                echo "apt-get install ufw"
+            else
+                echo "dnf install firewalld"
+            fi
+            ;;
+        *)
+            echo "Manual installation required"
+            ;;
+    esac
+}
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -833,6 +949,63 @@ get_sphinx_details() {
     echo "$details"
 }
 
+# Display components grouped by category
+display_components_by_category() {
+    local components=("$@")
+    local current_category=""
+    
+    # Sort by category
+    for item in "${components[@]}"; do
+        local category=$(echo "$item" | cut -d'|' -f1)
+        local component=$(echo "$item" | cut -d'|' -f2)
+        local hint=$(echo "$item" | cut -d'|' -f3)
+        
+        if [ "$category" != "$current_category" ]; then
+            echo ""
+            log "[$category]"
+            current_category="$category"
+        fi
+        
+        echo "  • $component"
+        if [ -n "$hint" ]; then
+            echo "    → $hint"
+        fi
+    done
+    echo ""
+}
+
+# Display missing components summary
+display_missing_components() {
+    local critical_count=${#MISSING_CRITICAL[@]}
+    local recommended_count=${#MISSING_RECOMMENDED[@]}
+    local total=$((critical_count + recommended_count))
+    
+    if [ "$total" -eq 0 ]; then
+        return 0
+    fi
+    
+    echo ""
+    log "=== Missing Components Summary ==="
+    log "Total: $total issues found (Critical: $critical_count, Recommended: $recommended_count)"
+    echo ""
+    
+    # Display critical components table
+    if [ "$critical_count" -gt 0 ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log "❌ CRITICAL COMPONENTS (must be installed)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        display_components_by_category "${MISSING_CRITICAL[@]}"
+    fi
+    
+    # Display recommended components table
+    if [ "$recommended_count" -gt 0 ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log "⚠️  RECOMMENDED COMPONENTS (optional but recommended)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        display_components_by_category "${MISSING_RECOMMENDED[@]}"
+    fi
+}
+
 # Check if command exists
 check_command() {
     local cmd="$1"
@@ -927,10 +1100,12 @@ check_locale_requirements() {
     # Check critical locales
     if ! check_locale "en_US.UTF-8" "en_US.UTF-8 (critical for date parsing)"; then
         missing=1
+        MISSING_CRITICAL+=("Locales|en_US.UTF-8|$(get_install_hint 'locale-en' 'en_US.UTF-8')")
     fi
     
     if ! check_locale "ru_RU.UTF-8" "ru_RU.UTF-8 (recommended for Russian dates)"; then
         log_warning "ru_RU.UTF-8 not available - Russian dates may not display correctly"
+        MISSING_RECOMMENDED+=("Locales|ru_RU.UTF-8|$(get_install_hint 'locale-ru' 'ru_RU.UTF-8')")
     fi
     
     # Test date parsing
@@ -1025,6 +1200,20 @@ check_php_requirements() {
         else
             log "❌ PHP extension: $ext (not loaded)"
             missing=1
+            case "$ext" in
+                "mysqli"|"pdo_mysql")
+                    MISSING_CRITICAL+=("PHP Extensions|$ext|$(get_install_hint 'php-mysql' '$ext')")
+                    ;;
+                "redis")
+                    MISSING_RECOMMENDED+=("PHP Extensions|$ext|$(get_install_hint 'php-redis' '$ext')")
+                    ;;
+                "opcache")
+                    MISSING_RECOMMENDED+=("PHP Extensions|$ext|$(get_install_hint 'php-opcache' '$ext')")
+                    ;;
+                "json")
+                    MISSING_CRITICAL+=("PHP Extensions|$ext|$(get_install_hint 'php-mysql' '$ext')")
+                    ;;
+            esac
         fi
     done
     
@@ -1200,6 +1389,7 @@ check_security_tools() {
     if ! check_command "lynis" "Lynis (comprehensive security audit tool)"; then
         log_warning "lynis not found - advanced security analysis will be limited"
         log "  Install: apt-get install lynis (Debian/Ubuntu) or dnf install lynis (RHEL-family)"
+        MISSING_RECOMMENDED+=("Security Tools|Lynis|$(get_install_hint 'lynis' 'Lynis')")
         echo ""
         missing=1
     fi
@@ -1210,6 +1400,7 @@ check_security_tools() {
             if ! check_command "debsecan" "Debsecan (Debian security scanner)"; then
                 log_warning "debsecan not found - CVE scanning will be limited"
                 log "  Install: apt-get install debsecan"
+                MISSING_RECOMMENDED+=("Security Tools|Debsecan|$(get_install_hint 'debsecan' 'Debsecan')")
                 echo ""
                 missing=1
             fi
@@ -1277,6 +1468,7 @@ check_security_tools() {
     if [ "$firewall_found" -eq 0 ]; then
         log_warning "No firewall tools found - firewall analysis will be limited"
         log "  Install: apt-get install ufw (Debian/Ubuntu) or dnf install firewalld (RHEL-family)"
+        MISSING_RECOMMENDED+=("Security Tools|Firewall Tools|$(get_install_hint 'firewall' 'Firewall Tools')")
         echo ""
         missing=1
     fi
@@ -1303,6 +1495,7 @@ check_additional_tools() {
         log_warning "mysqltuner not found - MySQL configuration analysis will be limited"
         log "  Install: apt-get install mysqltuner (Debian/Ubuntu)"
         log "  Or download: https://github.com/major/MySQLTuner-perl"
+        MISSING_RECOMMENDED+=("MySQL Tools|MySQLTuner|$(get_install_hint 'mysqltuner' 'MySQLTuner')")
         echo ""
     fi
     
@@ -1320,6 +1513,7 @@ check_additional_tools() {
         log_warning "Percona Toolkit not found - advanced MySQL analysis will be limited"
         log "  Install: apt-get install percona-toolkit (Debian/Ubuntu)"
         log "  Or: yum install percona-toolkit (CentOS/RHEL)"
+        MISSING_RECOMMENDED+=("MySQL Tools|Percona Toolkit|$(get_install_hint 'percona-toolkit' 'Percona Toolkit')")
         echo ""
     fi
     
@@ -1329,6 +1523,7 @@ check_additional_tools() {
         log_warning "tuned-adm not found - system tuning analysis will be limited"
         log "  Install: apt-get install tuned (Debian/Ubuntu)"
         log "  Or: yum install tuned (CentOS/RHEL)"
+        MISSING_RECOMMENDED+=("System Tools|tuned-adm|$(get_install_hint 'tuned' 'tuned-adm')")
         echo ""
     fi
     
@@ -1337,6 +1532,7 @@ check_additional_tools() {
         log_warning "sysbench not found - benchmarking will be limited"
         log "  Install: apt-get install sysbench (Debian/Ubuntu)"
         log "  Or: yum install sysbench (CentOS/RHEL)"
+        MISSING_RECOMMENDED+=("System Tools|sysbench|$(get_install_hint 'sysbench' 'sysbench')")
         echo ""
     fi
     
@@ -1348,6 +1544,7 @@ check_additional_tools() {
     
     if ! check_command "testssl.sh" "testssl.sh (SSL testing)"; then
         log_warning "testssl.sh not found - SSL testing will be limited"
+        MISSING_RECOMMENDED+=("Report Tools|testssl.sh|$(get_install_hint 'testssl' 'testssl.sh')")
         echo ""
     fi
     
@@ -1356,12 +1553,14 @@ check_additional_tools() {
     if ! check_command "wkhtmltopdf" "wkhtmltopdf (PDF generation)"; then
         log_warning "wkhtmltopdf not found - PDF report generation will be limited"
         log "  Install: apt-get install wkhtmltopdf (Debian/Ubuntu)"
+        MISSING_RECOMMENDED+=("Report Tools|wkhtmltopdf|$(get_install_hint 'wkhtmltopdf' 'wkhtmltopdf')")
         echo ""
     fi
     
     if ! check_command "gnuplot" "gnuplot (graphics generation)"; then
         log_warning "gnuplot not found - graphics generation will be limited"
         log "  Install: apt-get install gnuplot (Debian/Ubuntu)"
+        MISSING_RECOMMENDED+=("Report Tools|gnuplot|$(get_install_hint 'gnuplot' 'gnuplot')")
         echo ""
     fi
     
@@ -1585,6 +1784,9 @@ generate_installation_recommendations() {
 
 # Main execution
 main() {
+    # Detect distribution and package manager
+    detect_distro
+    
     log "Bitrix24 Audit Requirements Checker v$VERSION"
     log "Checking requirements for: ${MODULE:-all}"
     echo
@@ -1702,7 +1904,7 @@ main() {
         
         echo ""
         log "=== Auto-Install Mode ==="
-        log "Missing components: $total_missing issues found"
+        display_missing_components
         echo ""
         
         if [ "$NON_INTERACTIVE" -eq 0 ]; then
@@ -1732,7 +1934,9 @@ main() {
         log "✅ All requirements satisfied!"
         exit 0
     else
-        log "❌ Some requirements are missing. See recommendations above."
+        log "❌ Some requirements are missing. See details below."
+        echo ""
+        display_missing_components
         echo ""
         log "💡 Quick fix: Run automatic installation:"
         log "   sudo ./check_requirements.sh --install"
