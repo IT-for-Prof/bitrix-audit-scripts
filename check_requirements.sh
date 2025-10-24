@@ -505,8 +505,8 @@ auto_install_packages() {
     # Install testssl.sh manually
     if ! command -v testssl.sh >/dev/null 2>&1; then
         log_info "Installing testssl.sh..."
-        if curl -o /usr/local/bin/testssl.sh https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh; then
-            if chmod +x /usr/local/bin/testssl.sh; then
+        if curl -o "$SCRIPT_DIR/testssl.sh" https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh; then
+            if chmod +x "$SCRIPT_DIR/testssl.sh"; then
                 # Update command hash cache to make testssl.sh available immediately
                 hash -r
                 log_success "testssl.sh installed successfully"
@@ -2226,7 +2226,23 @@ check_additional_tools() {
         log_warning "openssl not found - SSL analysis will be limited"
     fi
     
-    if ! check_command "testssl.sh" "testssl.sh (SSL testing)"; then
+    # Check testssl.sh - first check local copy, then system command
+    if [ -x "$SCRIPT_DIR/testssl.sh" ]; then
+        log "✅ testssl.sh (SSL testing): found (local)"
+        if [ "$VERBOSE" = "1" ]; then
+            local version
+            version=$("$SCRIPT_DIR/testssl.sh" --version 2>/dev/null | head -n1 || echo "version unknown")
+            log_verbose "  Version: $version"
+        fi
+    elif command -v testssl.sh >/dev/null 2>&1; then
+        log "✅ testssl.sh (SSL testing): found (system)"
+        if [ "$VERBOSE" = "1" ]; then
+            local version
+            version=$(testssl.sh --version 2>/dev/null | head -n1 || echo "version unknown")
+            log_verbose "  Version: $version"
+        fi
+    else
+        log "❌ testssl.sh (SSL testing): not found"
         log_warning "testssl.sh not found - SSL testing will be limited"
         MISSING_CRITICAL+=("Report Tools|testssl.sh|$(get_install_hint 'testssl' 'testssl.sh')")
         echo ""
@@ -2451,7 +2467,7 @@ generate_installation_recommendations() {
             echo "  # For testssl.sh (manual installation):"
             echo "  curl -O https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh"
             echo "  chmod +x testssl.sh"
-            echo "  sudo mv testssl.sh /usr/local/bin/"
+            echo "  sudo mv testssl.sh $SCRIPT_DIR/"
             ;;
         *)
             log "Unknown distribution - manual installation required"

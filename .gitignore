@@ -40,6 +40,9 @@ audit_*.tgz
 /tmp/sar_*
 /tmp/cron_*
 
+# Downloaded tools
+testssl.sh
+
 # Editor temporary files
 .*.swp
 .*.swo
