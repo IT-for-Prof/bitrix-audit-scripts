@@ -159,7 +159,15 @@ detect_distro() {
             package_manager="apt"
             ;;
         "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
-            package_manager="dnf"
+            # Проверить доступность dnf, иначе использовать yum
+            if command -v dnf &> /dev/null; then
+                package_manager="dnf"
+            elif command -v yum &> /dev/null; then
+                package_manager="yum"
+            else
+                log_error "Neither dnf nor yum found"
+                return 1
+            fi
             ;;
         *)
             log_error "Unsupported distribution: $distro_id"
@@ -770,9 +778,9 @@ install_packages() {
             log_info "Installing packages: sysstat atop sysbench acct"
             apt-get install -y sysstat atop sysbench acct
             ;;
-        "dnf")
+        "dnf"|"yum")
             log_info "Installing packages: sysstat atop sysbench psacct"
-            dnf install -y sysstat atop sysbench psacct
+            $PACKAGE_MANAGER install -y sysstat atop sysbench psacct
             ;;
         *)
             log_error "Unknown package manager: $PACKAGE_MANAGER"
@@ -796,7 +804,7 @@ configure_sysstat() {
             sysstat_config="/etc/default/sysstat"
             cron_file="/etc/cron.d/sysstat"
             ;;
-        "dnf")
+        "dnf"|"yum")
             sysstat_config="/etc/sysconfig/sysstat"
             # Check if this is a newer system (RHEL 8+, AlmaLinux 8+, CentOS 8+) that uses systemd timers
             if [ -f /etc/os-release ]; then
@@ -923,7 +931,7 @@ configure_psacct() {
         "apt")
             service_name="acct"
             ;;
-        "dnf")
+        "dnf"|"yum")
             service_name="psacct"
             ;;
     esac
@@ -949,7 +957,7 @@ enable_services() {
         "apt")
             process_accounting_service="acct"
             ;;
-        "dnf")
+        "dnf"|"yum")
             process_accounting_service="psacct"
             ;;
     esac
@@ -1412,7 +1420,7 @@ main() {
             "apt")
                 process_accounting_service="acct"
                 ;;
-            "dnf")
+            "dnf"|"yum")
                 process_accounting_service="psacct"
                 ;;
         esac
