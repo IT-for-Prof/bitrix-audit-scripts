@@ -21,6 +21,8 @@ source "$SCRIPT_DIR/audit_common.sh"
 FORCE_INSTALL=0
 NON_INTERACTIVE=0
 VERBOSE=0
+DIAGNOSE_ONLY=0
+CHECK_ONLY=0
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -35,6 +37,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --verbose|-v)
             VERBOSE=1
+            shift
+            ;;
+        --diagnose)
+            DIAGNOSE_ONLY=1
+            shift
+            ;;
+        --check-only)
+            CHECK_ONLY=1
             shift
             ;;
         --help|-h)
@@ -60,6 +70,8 @@ OPTIONS:
     --force                 Force installation even if tools are already configured
     --non-interactive       Run without user prompts
     --verbose, -v           Enable verbose output
+    --diagnose              Run comprehensive diagnostics without making changes
+    --check-only            Check current setup status without installation
     --help, -h              Show this help
 
 DESCRIPTION:
@@ -83,6 +95,20 @@ EXAMPLES:
     $0                       # Interactive setup
     $0 --non-interactive     # Automated setup
     $0 --force --verbose     # Force reconfiguration with detailed output
+    $0 --diagnose            # Run comprehensive diagnostics
+    $0 --check-only          # Check current status only
+
+DIAGNOSTIC MODES:
+    --diagnose               Generates detailed reports for all services including:
+                            - Service status and configuration analysis
+                            - Comparison with recommended Bitrix24 settings
+                            - Data collection verification
+                            - Specific recommendations for optimization
+    
+    --check-only             Quick status check showing:
+                            - Service status with indicators (✓/⚠/✗)
+                            - Data collection status
+                            - Recommendations for next steps
 
 EOF
 }
@@ -168,6 +194,413 @@ backup_file() {
         log_warning "File $file does not exist, skipping backup"
         return 1
     fi
+}
+
+# ===== SERVICE DIAGNOSTIC FUNCTIONS =====
+
+# Get comprehensive service status
+get_service_status() {
+    local service_name="$1"
+    local status=""
+    local description=""
+    
+    # Check if unit file exists
+    if ! systemctl list-unit-files | grep -q "^${service_name}\.service "; then
+        status="not-found"
+        description="unit file not found"
+    else
+        # Get actual status
+        status=$(systemctl is-active "$service_name" 2>/dev/null || echo "unknown")
+        
+        # Special handling for services that might be enabled but not active
+        if [ "$status" = "unknown" ]; then
+            # Check if service is enabled but not active (common with timers)
+            if systemctl is-enabled "$service_name" >/dev/null 2>&1; then
+                status="inactive"
+                description="enabled but not active (may use timers)"
+            fi
+        fi
+        
+        case "$status" in
+            "active")
+                description="running"
+                ;;
+            "inactive")
+                description="installed but not started"
+                ;;
+            "failed")
+                description="startup failed"
+                ;;
+            "unknown")
+                description="status unknown"
+                ;;
+            *)
+                description="unexpected status: $status"
+                ;;
+        esac
+    fi
+    
+    echo "$status|$description"
+}
+
+# Get service configuration
+get_service_config() {
+    local service_name="$1"
+    local config_file=""
+    local config_data=""
+    
+    case "$service_name" in
+        "sysstat")
+            # Find sysstat config file
+            for path in "/etc/default/sysstat" "/etc/sysconfig/sysstat"; do
+                if [ -f "$path" ]; then
+                    config_file="$path"
+                    break
+                fi
+            done
+            ;;
+        "atop")
+            # Find atop config file
+            for path in "/etc/default/atop" "/etc/sysconfig/atop"; do
+                if [ -f "$path" ]; then
+                    config_file="$path"
+                    break
+                fi
+            done
+            ;;
+        "atopacctd")
+            # atopacctd doesn't have traditional config file
+            config_file="systemd"
+            ;;
+        "psacct"|"acct")
+            # Process accounting config
+            config_file="systemd"
+            ;;
+    esac
+    
+    if [ -n "$config_file" ] && [ "$config_file" != "systemd" ]; then
+        config_data=$(cat "$config_file" 2>/dev/null || echo "")
+    fi
+    
+    echo "$config_file|$config_data"
+}
+
+# Get service runtime parameters
+get_service_runtime_params() {
+    local service_name="$1"
+    local pid=""
+    local cmdline=""
+    local env_vars=""
+    
+    # Get PID
+    pid=$(systemctl show "$service_name" --property=MainPID --value 2>/dev/null || echo "")
+    
+    if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+        # Get command line
+        cmdline=$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' || echo "")
+        
+        # Get environment variables
+        env_vars=$(systemctl show "$service_name" --property=Environment --value 2>/dev/null || echo "")
+    fi
+    
+    echo "$pid|$cmdline|$env_vars"
+}
+
+# Get expected configuration for Bitrix24
+get_expected_config() {
+    local service_name="$1"
+    
+    case "$service_name" in
+        "sysstat")
+            echo "ENABLED=true|HISTORY=7|INTERVAL=30"
+            ;;
+        "atop")
+            echo "LOGGING=yes|LOGINTERVAL=30|LOGSAVINGS=7|LOGROTATE=7|PERIOD=7"
+            ;;
+        "atopacctd")
+            echo "ENABLED=true|RUNNING=true"
+            ;;
+        "psacct"|"acct")
+            echo "ENABLED=true|RUNNING=true"
+            ;;
+    esac
+}
+
+# Compare current config with expected
+compare_config_with_expected() {
+    local service_name="$1"
+    local current_config="$2"
+    local expected_config="$3"
+    local issues=""
+    local warnings=""
+    local infos=""
+    
+    case "$service_name" in
+        "sysstat")
+            # Check ENABLED
+            if echo "$current_config" | grep -q 'ENABLED="true"'; then
+                issues="${issues}✓ ENABLED=true\n"
+            else
+                issues="${issues}✗ ENABLED not set to true\n"
+            fi
+            
+            # Check HISTORY
+            local history=$(echo "$current_config" | grep -o 'HISTORY=[0-9]*' | cut -d= -f2)
+            if [ -n "$history" ]; then
+                if [ "$history" -ge 7 ]; then
+                    issues="${issues}✓ HISTORY=$history (>=7 days)\n"
+                elif [ "$history" -ge 3 ]; then
+                    warnings="${warnings}⚠ HISTORY=$history (expected: 7, current: $history)\n"
+                else
+                    issues="${issues}✗ HISTORY=$history (too short, expected: 7)\n"
+                fi
+            else
+                issues="${issues}✗ HISTORY not set\n"
+            fi
+            ;;
+            
+        "atop")
+            # Check LOGGING
+            if echo "$current_config" | grep -q 'LOGGING=yes'; then
+                issues="${issues}✓ LOGGING=yes\n"
+            else
+                issues="${issues}✗ LOGGING not enabled\n"
+            fi
+            
+            # Check LOGINTERVAL
+            local interval=$(echo "$current_config" | grep -o 'LOGINTERVAL=[0-9]*' | cut -d= -f2)
+            if [ -n "$interval" ]; then
+                if [ "$interval" -le 30 ]; then
+                    issues="${issues}✓ LOGINTERVAL=$interval (<=30s)\n"
+                elif [ "$interval" -le 60 ]; then
+                    warnings="${warnings}⚠ LOGINTERVAL=$interval (expected: 30, current: $interval)\n"
+                else
+                    issues="${issues}✗ LOGINTERVAL=$interval (too long, expected: 30)\n"
+                fi
+            else
+                issues="${issues}✗ LOGINTERVAL not set\n"
+            fi
+            
+            # Check LOGSAVINGS
+            local savings=$(echo "$current_config" | grep -o 'LOGSAVINGS=[0-9]*' | cut -d= -f2)
+            if [ -n "$savings" ]; then
+                if [ "$savings" -ge 7 ]; then
+                    issues="${issues}✓ LOGSAVINGS=$savings (>=7 days)\n"
+                elif [ "$savings" -ge 3 ]; then
+                    warnings="${warnings}⚠ LOGSAVINGS=$savings (expected: 7, current: $savings)\n"
+                else
+                    issues="${issues}✗ LOGSAVINGS=$savings (too short, expected: 7)\n"
+                fi
+            else
+                issues="${issues}✗ LOGSAVINGS not set\n"
+            fi
+            ;;
+    esac
+    
+    echo "$issues|$warnings|$infos"
+}
+
+# Check service data collection
+check_service_data_collection() {
+    local service_name="$1"
+    local data_dir=""
+    local latest_file=""
+    local file_age=""
+    local file_size=""
+    local status=""
+    
+    case "$service_name" in
+        "sysstat")
+            data_dir="/var/log/sa"
+            ;;
+        "atop")
+            data_dir="/var/log/atop"
+            ;;
+        "atopacctd")
+            # Check for pacct files
+            if [ -f "/var/run/pacct_source" ] || [ -d "/var/run/pacct_shadow.d" ]; then
+                status="✓ pacct files present"
+            else
+                status="✗ pacct files not found"
+            fi
+            echo "$status"
+            return
+            ;;
+        "psacct"|"acct")
+            # Check for accounting files
+            for path in "/var/log/account/pacct" "/var/account/pacct"; do
+                if [ -f "$path" ]; then
+                    status="✓ accounting file present: $path"
+                    echo "$status"
+                    return
+                fi
+            done
+            status="✗ accounting files not found"
+            echo "$status"
+            return
+            ;;
+    esac
+    
+    if [ -d "$data_dir" ]; then
+        # Find latest file
+        latest_file=$(ls -t "$data_dir" 2>/dev/null | head -n1)
+        
+        if [ -n "$latest_file" ]; then
+            # Get file age in minutes
+            file_age=$(find "$data_dir/$latest_file" -mmin -5 2>/dev/null | wc -l)
+            
+            # Get file size
+            file_size=$(stat -c%s "$data_dir/$latest_file" 2>/dev/null || echo "0")
+            
+            if [ "$file_age" -gt 0 ]; then
+                status="✓ Data files present: $data_dir"
+                status="${status}\n✓ Latest file: $latest_file (modified <5 min ago)"
+            else
+                status="⚠ Data files present: $data_dir"
+                status="${status}\n⚠ Latest file: $latest_file (modified >5 min ago)"
+            fi
+            
+            if [ "$file_size" -gt 0 ]; then
+                status="${status}\n✓ File size: ${file_size}B (non-empty)"
+            else
+                status="${status}\n✗ File size: 0B (empty)"
+            fi
+        else
+            status="✗ No data files found in $data_dir"
+        fi
+    else
+        status="✗ Data directory not found: $data_dir"
+    fi
+    
+    echo "$status"
+}
+
+# Comprehensive service diagnosis
+diagnose_service_comprehensive() {
+    local service_name="$1"
+    local status_info=""
+    local config_info=""
+    local runtime_info=""
+    local expected_config=""
+    local comparison=""
+    local data_collection=""
+    local issues=""
+    local warnings=""
+    local infos=""
+    
+    log_verbose "Diagnosing service: $service_name"
+    
+    # Get service status
+    status_info=$(get_service_status "$service_name")
+    local status=$(echo "$status_info" | cut -d'|' -f1)
+    local description=$(echo "$status_info" | cut -d'|' -f2)
+    
+    # Get configuration
+    config_info=$(get_service_config "$service_name")
+    local config_file=$(echo "$config_info" | cut -d'|' -f1)
+    local config_data=$(echo "$config_info" | cut -d'|' -f2)
+    
+    # Get runtime parameters
+    runtime_info=$(get_service_runtime_params "$service_name")
+    local pid=$(echo "$runtime_info" | cut -d'|' -f1)
+    local cmdline=$(echo "$runtime_info" | cut -d'|' -f2)
+    local env_vars=$(echo "$runtime_info" | cut -d'|' -f3)
+    
+    # Get expected configuration
+    expected_config=$(get_expected_config "$service_name")
+    
+    # Compare configurations
+    if [ -n "$config_data" ]; then
+        comparison=$(compare_config_with_expected "$service_name" "$config_data" "$expected_config")
+        issues=$(echo "$comparison" | cut -d'|' -f1)
+        warnings=$(echo "$comparison" | cut -d'|' -f2)
+        infos=$(echo "$comparison" | cut -d'|' -f3)
+    fi
+    
+    # Check data collection
+    data_collection=$(check_service_data_collection "$service_name")
+    
+    # Determine overall status
+    local overall_status="OK"
+    if [ "$status" = "not-found" ] || [ "$status" = "failed" ]; then
+        overall_status="CRITICAL"
+    elif [ "$status" = "inactive" ] || [ "$status" = "unknown" ]; then
+        overall_status="WARNING"
+    fi
+    
+    # Check for critical issues in comparison
+    if echo "$issues" | grep -q "✗"; then
+        overall_status="CRITICAL"
+    elif echo "$warnings" | grep -q "⚠"; then
+        if [ "$overall_status" = "OK" ]; then
+            overall_status="WARNING"
+        fi
+    fi
+    
+    # Output results
+    echo "Service: $service_name"
+    echo "Overall Status: $overall_status"
+    echo "Service Status: $status ($description)"
+    echo "Config File: $config_file"
+    
+    if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+        echo "PID: $pid"
+        echo "Command: $cmdline"
+    fi
+    
+    if [ -n "$issues" ]; then
+        echo -e "\nConfiguration Check:"
+        echo -e "$issues"
+    fi
+    
+    if [ -n "$warnings" ]; then
+        echo -e "\nWarnings:"
+        echo -e "$warnings"
+    fi
+    
+    if [ -n "$data_collection" ]; then
+        echo -e "\nData Collection:"
+        echo -e "$data_collection"
+    fi
+    
+    echo ""
+}
+
+# Generate service report
+generate_service_report() {
+    local service_name="$1"
+    
+    echo "================================================"
+    echo "SERVICE REPORT: $service_name"
+    echo "================================================"
+    
+    diagnose_service_comprehensive "$service_name"
+    
+    # Add recommendations
+    echo "Recommendations:"
+    case "$service_name" in
+        "sysstat")
+            echo "  • Ensure ENABLED=true in config"
+            echo "  • Set HISTORY=7 for better analysis"
+            echo "  • Verify cron/systemd timers are active"
+            ;;
+        "atop")
+            echo "  • Enable LOGGING=yes"
+            echo "  • Set LOGINTERVAL=30 for optimal monitoring"
+            echo "  • Set LOGSAVINGS=7 for sufficient history"
+            ;;
+        "atopacctd")
+            echo "  • Ensure atopacctd service is running"
+            echo "  • Check /var/run/pacct_source exists"
+            ;;
+        "psacct"|"acct")
+            echo "  • Ensure process accounting is enabled"
+            echo "  • Check accounting files are being created"
+            ;;
+    esac
+    
+    echo "================================================"
+    echo ""
 }
 
 # Install packages based on distribution
@@ -351,43 +784,133 @@ configure_psacct() {
 enable_services() {
     log_info "Enabling and starting services..."
     
-    # Enable sysstat
-    systemctl enable sysstat
-    systemctl start sysstat
-    log_success "sysstat service enabled and started"
+    local services=("sysstat" "atop")
+    local optional_services=("atopacctd")
+    local process_accounting_service=""
+    local failed_services=0
     
-    # Enable atop
-    systemctl enable atop
-    systemctl start atop
-    log_success "atop service enabled and started"
-    
-    # Enable atopacctd if available
-    if systemctl list-unit-files | grep -q atopacctd; then
-        systemctl enable atopacctd
-        systemctl start atopacctd
-        log_success "atopacctd service enabled and started"
-    else
-        log_info "atopacctd service not available"
-    fi
-    
-    # Enable process accounting
-    local service_name=""
+    # Determine process accounting service name
     case "$PACKAGE_MANAGER" in
         "apt")
-            service_name="acct"
+            process_accounting_service="acct"
             ;;
         "dnf")
-            service_name="psacct"
+            process_accounting_service="psacct"
             ;;
     esac
     
-    if [ -n "$service_name" ] && systemctl list-unit-files | grep -q "$service_name"; then
-        systemctl enable "$service_name"
-        systemctl start "$service_name"
-        log_success "$service_name service enabled and started"
+    echo ""
+    echo "================================================"
+    echo "SERVICE ENABLEMENT AND STARTUP"
+    echo "================================================"
+    
+    # Enable and start main services
+    for service in "${services[@]}"; do
+        echo ""
+        log_info "Processing $service service..."
+        
+        # Check if unit file exists
+        if ! systemctl list-unit-files | grep -q "^${service}.service"; then
+            log_error "$service unit file not found"
+            log_warning "This usually means the package is not installed properly"
+            log_info "Try reinstalling: $PACKAGE_MANAGER install $service"
+            failed_services=$((failed_services + 1))
+            continue
+        fi
+        
+        # Enable service
+        log_info "Enabling $service service..."
+        if systemctl enable "$service" >/dev/null 2>&1; then
+            log_success "$service service enabled"
+        else
+            log_error "Failed to enable $service service"
+            failed_services=$((failed_services + 1))
+            continue
+        fi
+        
+        # Start service
+        log_info "Starting $service service..."
+        if systemctl start "$service" >/dev/null 2>&1; then
+            log_success "$service service started"
+            
+            # Verify it's actually running
+            sleep 2
+            if systemctl is-active "$service" >/dev/null 2>&1; then
+                log_success "$service service is running"
+            else
+                log_warning "$service service started but not running"
+                log_info "Check logs: journalctl -u $service"
+                failed_services=$((failed_services + 1))
+            fi
+        else
+            log_error "Failed to start $service service"
+            log_info "Check logs: journalctl -u $service"
+            failed_services=$((failed_services + 1))
+        fi
+    done
+    
+    # Handle optional services
+    echo ""
+    log_info "Processing optional services..."
+    
+    # atopacctd
+    if systemctl list-unit-files | grep -q "^atopacctd.service"; then
+        log_info "Processing atopacctd service..."
+        if systemctl enable atopacctd >/dev/null 2>&1; then
+            log_success "atopacctd service enabled"
+            if systemctl start atopacctd >/dev/null 2>&1; then
+                log_success "atopacctd service started"
+            else
+                log_warning "atopacctd service failed to start (optional)"
+            fi
+        else
+            log_warning "atopacctd service not available (optional)"
+        fi
     else
-        log_warning "Process accounting service not available"
+        log_info "atopacctd service not available (optional)"
     fi
+    
+    # Process accounting
+    if [ -n "$process_accounting_service" ]; then
+        log_info "Processing $process_accounting_service service..."
+        if systemctl list-unit-files | grep -q "^${process_accounting_service}.service"; then
+            if systemctl enable "$process_accounting_service" >/dev/null 2>&1; then
+                log_success "$process_accounting_service service enabled"
+                if systemctl start "$process_accounting_service" >/dev/null 2>&1; then
+                    log_success "$process_accounting_service service started"
+                else
+                    log_warning "$process_accounting_service service failed to start"
+                fi
+            else
+                log_warning "Failed to enable $process_accounting_service service"
+            fi
+        else
+            log_warning "$process_accounting_service service not available"
+        fi
+    fi
+    
+    # Summary
+    echo ""
+    echo "================================================"
+    echo "SERVICE STARTUP SUMMARY"
+    echo "================================================"
+    
+    if [ "$failed_services" -eq 0 ]; then
+        log_success "All main services started successfully"
+    else
+        log_error "$failed_services main service(s) failed to start"
+        echo ""
+        echo "Troubleshooting steps:"
+        echo "  1. Check service logs: journalctl -u <service_name>"
+        echo "  2. Check configuration files for errors"
+        echo "  3. Verify package installation: rpm -qa | grep <package>"
+        echo "  4. Try manual start: systemctl start <service_name>"
+        echo "  5. Run diagnostics: $0 --diagnose"
+    fi
+    
+    echo "================================================"
+    
+    return $failed_services
 }
 
 # Verify setup
@@ -395,47 +918,142 @@ verify_setup() {
     log_info "Verifying setup..."
     
     local all_good=1
+    local services=("sysstat" "atop")
+    local critical_issues=0
+    local warnings=0
     
-    # Check sysstat
-    if systemctl is-active sysstat >/dev/null 2>&1; then
-        log_success "sysstat is running"
-    else
-        log_error "sysstat is not running"
-        all_good=0
-    fi
+    echo ""
+    echo "================================================"
+    echo "COMPREHENSIVE SERVICE VERIFICATION"
+    echo "================================================"
     
-    # Check atop
-    if systemctl is-active atop >/dev/null 2>&1; then
-        log_success "atop is running"
-    else
-        log_error "atop is not running"
-        all_good=0
-    fi
-    
-    # Check if sar data is being collected
-    if [ -d /var/log/sa ] && [ "$(ls -A /var/log/sa 2>/dev/null)" ]; then
-        log_success "sar data collection is working"
-    else
-        log_warning "sar data collection may not be working yet (wait a few minutes)"
-    fi
-    
-    # Check if atop data is being collected
-    if [ -d /var/log/atop ] && [ "$(ls -A /var/log/atop 2>/dev/null)" ]; then
-        log_success "atop data collection is working"
-    else
-        log_warning "atop data collection may not be working yet (wait a few minutes)"
-    fi
+    # Check each service comprehensively
+    for service in "${services[@]}"; do
+        echo ""
+        log_info "Checking $service service..."
+        
+        # Get service status
+        local service_status=$(get_service_status "$service")
+        local status=$(echo "$service_status" | cut -d'|' -f1)
+        local description=$(echo "$service_status" | cut -d'|' -f2)
+        
+        case "$status" in
+            "active")
+                log_success "$service is running ($description)"
+                
+                # Check configuration
+                local config_info=$(get_service_config "$service")
+                local config_file=$(echo "$config_info" | cut -d'|' -f1)
+                local config_data=$(echo "$config_info" | cut -d'|' -f2)
+                
+                if [ -n "$config_data" ]; then
+                    local expected_config=$(get_expected_config "$service")
+                    local comparison=$(compare_config_with_expected "$service" "$config_data" "$expected_config")
+                    local issues=$(echo "$comparison" | cut -d'|' -f1)
+                    local warnings_text=$(echo "$comparison" | cut -d'|' -f2)
+                    
+                    if echo "$issues" | grep -q "✗"; then
+                        log_error "$service configuration issues detected:"
+                        echo -e "$issues"
+                        critical_issues=$((critical_issues + 1))
+                        all_good=0
+                    elif echo "$warnings_text" | grep -q "⚠"; then
+                        log_warning "$service configuration warnings:"
+                        echo -e "$warnings_text"
+                        warnings=$((warnings + 1))
+                    else
+                        log_success "$service configuration is optimal"
+                    fi
+                fi
+                
+                # Check data collection
+                local data_status=$(check_service_data_collection "$service")
+                if echo "$data_status" | grep -q "✓"; then
+                    log_success "$service data collection is working"
+                elif echo "$data_status" | grep -q "⚠"; then
+                    log_warning "$service data collection issues:"
+                    echo -e "$data_status"
+                    warnings=$((warnings + 1))
+                else
+                    log_error "$service data collection problems:"
+                    echo -e "$data_status"
+                    critical_issues=$((critical_issues + 1))
+                    all_good=0
+                fi
+                ;;
+            "inactive")
+                log_warning "$service is installed but not started ($description)"
+                warnings=$((warnings + 1))
+                all_good=0
+                ;;
+            "failed")
+                log_error "$service failed to start ($description)"
+                critical_issues=$((critical_issues + 1))
+                all_good=0
+                ;;
+            "unknown")
+                log_error "$service status unknown ($description)"
+                critical_issues=$((critical_issues + 1))
+                all_good=0
+                ;;
+            "not-found")
+                log_error "$service not found ($description)"
+                critical_issues=$((critical_issues + 1))
+                all_good=0
+                ;;
+        esac
+    done
     
     # Check commands availability
+    echo ""
+    log_info "Checking command availability..."
     local commands=("sar" "atop" "sysbench" "iostat" "vmstat")
+    local missing_commands=0
+    
     for cmd in "${commands[@]}"; do
         if command -v "$cmd" >/dev/null 2>&1; then
             log_success "$cmd command is available"
         else
             log_error "$cmd command is not available"
+            missing_commands=$((missing_commands + 1))
             all_good=0
         fi
     done
+    
+    # Summary
+    echo ""
+    echo "================================================"
+    echo "VERIFICATION SUMMARY"
+    echo "================================================"
+    
+    if [ "$critical_issues" -eq 0 ] && [ "$missing_commands" -eq 0 ]; then
+        if [ "$warnings" -eq 0 ]; then
+            log_success "All services are running correctly with optimal configuration"
+        else
+            log_warning "All services are running but $warnings configuration warnings detected"
+            echo ""
+            echo "Recommendations:"
+            echo "  • Review configuration warnings above"
+            echo "  • Consider adjusting settings for optimal Bitrix24 monitoring"
+            echo "  • Run with --diagnose for detailed analysis"
+        fi
+    else
+        log_error "Setup verification failed"
+        echo ""
+        echo "Issues found:"
+        echo "  • Critical issues: $critical_issues"
+        echo "  • Configuration warnings: $warnings"
+        echo "  • Missing commands: $missing_commands"
+        echo ""
+        echo "Troubleshooting:"
+        echo "  • Check service status: systemctl status sysstat atop"
+        echo "  • Check logs: journalctl -u sysstat -u atop"
+        echo "  • Restart services: systemctl restart sysstat atop"
+        echo "  • Run diagnostics: $0 --diagnose"
+        echo ""
+    fi
+    
+    echo "================================================"
     
     return $all_good
 }
@@ -515,31 +1133,82 @@ check_existing_setup() {
     fi
     
     local configured=0
+    local services=("sysstat" "atop")
+    local service_status=""
+    local status=""
+    local description=""
+    local data_collection_status=""
     
-    # Check if sysstat is configured
-    if systemctl is-active sysstat >/dev/null 2>&1; then
-        configured=$((configured + 1))
-    fi
+    # Check each service
+    for service in "${services[@]}"; do
+        service_status=$(get_service_status "$service")
+        status=$(echo "$service_status" | cut -d'|' -f1)
+        description=$(echo "$service_status" | cut -d'|' -f2)
+        
+        if [ "$status" = "active" ]; then
+            configured=$((configured + 1))
+        fi
+    done
     
-    # Check if atop is configured
-    if systemctl is-active atop >/dev/null 2>&1; then
-        configured=$((configured + 1))
-    fi
-    
-    # Check if data is being collected
+    # Check data collection
+    local data_collecting=0
     if [ -d /var/log/sa ] && [ "$(ls -A /var/log/sa 2>/dev/null)" ]; then
-        configured=$((configured + 1))
+        data_collecting=1
     fi
     
-    if [ "$configured" -ge 2 ]; then
+    if [ "$configured" -ge 1 ] || [ "$data_collecting" -eq 1 ]; then
         log_warning "Monitoring tools appear to be already configured"
         echo ""
         echo "Detected:"
-        echo "  • sysstat service: $(systemctl is-active sysstat 2>/dev/null || echo 'inactive')"
-        echo "  • atop service: $(systemctl is-active atop 2>/dev/null || echo 'inactive')"
-        echo "  • Data collection: $(if [ -d /var/log/sa ] && [ "$(ls -A /var/log/sa 2>/dev/null)" ]; then echo 'active'; else echo 'inactive'; fi)"
+        
+        # Show status for each service with indicators
+        for service in "${services[@]}"; do
+            service_status=$(get_service_status "$service")
+            status=$(echo "$service_status" | cut -d'|' -f1)
+            description=$(echo "$service_status" | cut -d'|' -f2)
+            
+            case "$status" in
+                "active")
+                    echo "  • $service service: ✓ active ($description)"
+                    ;;
+                "inactive")
+                    echo "  • $service service: ⚠ inactive ($description)"
+                    ;;
+                "failed")
+                    echo "  • $service service: ✗ failed ($description)"
+                    ;;
+                "unknown")
+                    echo "  • $service service: ✗ unknown ($description)"
+                    ;;
+                "not-found")
+                    echo "  • $service service: ✗ not found ($description)"
+                    ;;
+                *)
+                    echo "  • $service service: ? $status ($description)"
+                    ;;
+            esac
+        done
+        
+        # Check data collection status
+        local sysstat_data=""
+        local atop_data=""
+        
+        if [ -d /var/log/sa ] && [ "$(ls -A /var/log/sa 2>/dev/null)" ]; then
+            sysstat_data="✓ sysstat collecting"
+        else
+            sysstat_data="✗ sysstat not collecting"
+        fi
+        
+        if [ -d /var/log/atop ] && [ "$(ls -A /var/log/atop 2>/dev/null)" ]; then
+            atop_data="✓ atop collecting"
+        else
+            atop_data="✗ atop not collecting"
+        fi
+        
+        echo "  • Data collection: $sysstat_data, $atop_data"
         echo ""
         echo "Use --force to reconfigure anyway"
+        echo "Use --diagnose to see detailed service reports"
         return 0
     fi
     
@@ -553,6 +1222,79 @@ main() {
     
     # Detect distribution
     detect_distro
+    
+    # Handle diagnostic modes
+    if [ "$DIAGNOSE_ONLY" = "1" ]; then
+        echo "================================================"
+        echo "COMPREHENSIVE SERVICE DIAGNOSTICS"
+        echo "================================================"
+        echo ""
+        
+        local services=("sysstat" "atop" "atopacctd")
+        local process_accounting_service=""
+        
+        # Determine process accounting service name
+        case "$PACKAGE_MANAGER" in
+            "apt")
+                process_accounting_service="acct"
+                ;;
+            "dnf")
+                process_accounting_service="psacct"
+                ;;
+        esac
+        
+        if [ -n "$process_accounting_service" ]; then
+            services+=("$process_accounting_service")
+        fi
+        
+        for service in "${services[@]}"; do
+            generate_service_report "$service"
+        done
+        
+        echo "================================================"
+        echo "DIAGNOSTICS COMPLETE"
+        echo "================================================"
+        echo ""
+        echo "Next steps:"
+        echo "  • Review recommendations above"
+        echo "  • Run setup with --force to apply fixes"
+        echo "  • Use --check-only for quick status updates"
+        echo ""
+        exit 0
+    fi
+    
+    if [ "$CHECK_ONLY" = "1" ]; then
+        echo "================================================"
+        echo "QUICK STATUS CHECK"
+        echo "================================================"
+        echo ""
+        
+        # Use check_existing_setup but force it to run
+        local original_force="$FORCE_INSTALL"
+        FORCE_INSTALL=0
+        
+        if check_existing_setup; then
+            echo ""
+            echo "================================================"
+            echo "STATUS CHECK COMPLETE"
+            echo "================================================"
+            echo ""
+            echo "Recommendations:"
+            echo "  • Use --diagnose for detailed analysis"
+            echo "  • Use --force to reconfigure if needed"
+        else
+            echo ""
+            echo "================================================"
+            echo "STATUS CHECK COMPLETE"
+            echo "================================================"
+            echo ""
+            echo "No monitoring tools detected."
+            echo "Run without --check-only to install and configure."
+        fi
+        
+        FORCE_INSTALL="$original_force"
+        exit 0
+    fi
     
     # Check if already configured
     if check_existing_setup; then
@@ -590,6 +1332,7 @@ main() {
         echo "  • Check service status: systemctl status sysstat atop"
         echo "  • Check logs: journalctl -u sysstat -u atop"
         echo "  • Restart services: systemctl restart sysstat atop"
+        echo "  • Run diagnostics: $0 --diagnose"
         echo ""
     fi
     
