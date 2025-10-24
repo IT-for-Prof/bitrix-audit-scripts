@@ -423,7 +423,12 @@ get_expected_config() {
     
     case "$service_name" in
         "sysstat")
-            echo "ENABLED=true|HISTORY=7|INTERVAL=30"
+            # ENABLED используется только на Debian/Ubuntu
+            if [ "$PACKAGE_MANAGER" = "apt" ]; then
+                echo "ENABLED=true|HISTORY=7|INTERVAL=30"
+            else
+                echo "HISTORY=7|INTERVAL=30"
+            fi
             ;;
         "atop")
             echo "LOGGING=yes|LOGINTERVAL=30|LOGSAVINGS=7|LOGROTATE=7|PERIOD=7"
@@ -448,11 +453,13 @@ compare_config_with_expected() {
     
     case "$service_name" in
         "sysstat")
-            # Check ENABLED
-            if echo "$current_config" | grep -q 'ENABLED="true"'; then
-                issues="${issues}✓ ENABLED=true\n"
-            else
-                issues="${issues}✗ ENABLED not set to true\n"
+            # Check ENABLED (только для Debian/Ubuntu)
+            if [ "$PACKAGE_MANAGER" = "apt" ]; then
+                if echo "$current_config" | grep -q 'ENABLED="true"'; then
+                    issues="${issues}✓ ENABLED=true\n"
+                else
+                    issues="${issues}✗ ENABLED not set to true\n"
+                fi
             fi
             
             # Check HISTORY
@@ -743,7 +750,9 @@ generate_service_report() {
     echo "Recommendations:"
     case "$service_name" in
         "sysstat")
-            echo "  • Ensure ENABLED=true in config"
+            if [ "$PACKAGE_MANAGER" = "apt" ]; then
+                echo "  • Ensure ENABLED=true in config"
+            fi
             echo "  • Set HISTORY=7 for better analysis"
             echo "  • Verify cron/systemd timers are active"
             ;;
@@ -826,9 +835,11 @@ configure_sysstat() {
     if [ -f "$sysstat_config" ]; then
         backup_file "$sysstat_config"
         
-        # Enable sysstat
-        sed -ri 's/^ENABLED=.*/ENABLED="true"/' "$sysstat_config" || \
-        echo 'ENABLED="true"' >> "$sysstat_config"
+        # Enable sysstat (только для Debian/Ubuntu)
+        if [ "$PACKAGE_MANAGER" = "apt" ]; then
+            sed -ri 's/^ENABLED=.*/ENABLED="true"/' "$sysstat_config" || \
+            echo 'ENABLED="true"' >> "$sysstat_config"
+        fi
         
         # Set history to 7 days
         sed -ri 's/^HISTORY=.*/HISTORY=7/' "$sysstat_config" || \
