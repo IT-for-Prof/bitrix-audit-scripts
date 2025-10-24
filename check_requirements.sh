@@ -77,6 +77,10 @@ track_package_install() {
         "skipped") ((INSTALL_COUNTERS[2]++)) ;;
         "failed") ((INSTALL_COUNTERS[3]++)) ;;
     esac
+    
+    if [ "$VERBOSE" = "1" ]; then
+        log_verbose "Tracking: $package -> $status ($version)"
+    fi
 }
 
 # Helper function to get package version
@@ -84,12 +88,31 @@ get_package_version() {
     local package="$1"
     local pkg_manager="$2"
     
+    if [ "$VERBOSE" = "1" ]; then
+        log_verbose "Getting version for: $package using $pkg_manager"
+    fi
+    
     case "$pkg_manager" in
         "apt-get")
-            apt list --installed 2>/dev/null | grep "^$package/" | awk '{print $2}' | head -n1
+            apt list --installed 2>/dev/null | grep "^$package/" | awk '{print $2}' | head -n1 || echo "unknown"
             ;;
         "yum"|"dnf")
-            rpm -q "$package" 2>/dev/null | sed 's/.*-//' | head -n1
+            # Use rpm to get version, handle errors properly
+            local rpm_output
+            rpm_output=$(rpm -q "$package" 2>/dev/null || echo "")
+            if [ -n "$rpm_output" ] && [[ ! "$rpm_output" =~ "not installed" ]]; then
+                # Extract version from rpm output: package-version-release.arch
+                local version=$(echo "$rpm_output" | sed 's/^[^-]*-//' | head -n1)
+                if [ "$VERBOSE" = "1" ]; then
+                    log_verbose "RPM output: $rpm_output -> version: $version"
+                fi
+                echo "$version"
+            else
+                if [ "$VERBOSE" = "1" ]; then
+                    log_verbose "Package not found or error: $rpm_output"
+                fi
+                echo "unknown"
+            fi
             ;;
         *)
             echo "unknown"
@@ -107,7 +130,7 @@ install_percona_toolkit() {
         "ubuntu"|"debian")
             # Check if already installed
             local pt_version_before
-            pt_version_before=$(get_package_version "percona-toolkit" "apt-get")
+            pt_version_before=$(get_package_version "percona-toolkit" "apt-get" || echo "unknown")
             
             if [ -n "$pt_version_before" ] && [ "$pt_version_before" != "unknown" ]; then
                 log_info "Percona Toolkit already installed (version: $pt_version_before)"
@@ -115,7 +138,7 @@ install_percona_toolkit() {
             else
                 if apt-get install -y percona-toolkit; then
                     local pt_version_after
-                    pt_version_after=$(get_package_version "percona-toolkit" "apt-get")
+                    pt_version_after=$(get_package_version "percona-toolkit" "apt-get" || echo "unknown")
                     log_success "Percona Toolkit installed successfully (version: $pt_version_after)"
                     track_package_install "percona-toolkit" "installed" "$pt_version_after"
                 else
@@ -133,7 +156,7 @@ install_percona_toolkit() {
             
             # Check if already installed
             local pt_version_before
-            pt_version_before=$(get_package_version "percona-toolkit" "$pkg_manager")
+            pt_version_before=$(get_package_version "percona-toolkit" "$pkg_manager" || echo "unknown")
             
             if [ -n "$pt_version_before" ] && [ "$pt_version_before" != "unknown" ]; then
                 log_info "Percona Toolkit already installed (version: $pt_version_before)"
@@ -150,7 +173,7 @@ install_percona_toolkit() {
                         log_info "Installing percona-toolkit..."
                         if $pkg_manager install -y percona-toolkit; then
                             local pt_version_after
-                            pt_version_after=$(get_package_version "percona-toolkit" "$pkg_manager")
+                            pt_version_after=$(get_package_version "percona-toolkit" "$pkg_manager" || echo "unknown")
                             log_success "Percona Toolkit installed successfully (version: $pt_version_after)"
                             track_package_install "percona-toolkit" "installed" "$pt_version_after"
                         else
@@ -226,28 +249,36 @@ check_package_vulnerabilities() {
             log_info "Checking security updates with $pkg_manager..."
             
             # Check if updateinfo command works
-            if ! $pkg_manager updateinfo list 2>/dev/null | head -n1 | grep -q "updateinfo"; then
+            local updateinfo_available=0
+            if $pkg_manager updateinfo list >/dev/null 2>&1; then
+                updateinfo_available=1
+                log_info "updateinfo support: available"
+            else
                 log_warning "$pkg_manager updateinfo not available - security check limited"
                 log_info "Consider installing yum-plugin-security for detailed security analysis"
                 return 0
             fi
             
             # Check security updates
-            local security_updates
-            security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -cE "^(Critical|Important)" || echo "0")
-            
-            if [ "$security_updates" -gt 0 ]; then
-                log_warning "Found $security_updates critical/important security updates"
-                $pkg_manager updateinfo list security 2>/dev/null | grep -E "^(Critical|Important)" | head -n 10
+            local security_updates=0
+            if $pkg_manager updateinfo list security >/dev/null 2>&1; then
+                security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -cE "^(Critical|Important)" || echo "0")
+                
+                if [ "$security_updates" -gt 0 ]; then
+                    log_warning "Found $security_updates critical/important security updates"
+                    $pkg_manager updateinfo list security 2>/dev/null | grep -E "^(Critical|Important)" | head -n 10
+                else
+                    log_success "No critical/important security updates found"
+                fi
+                
+                # Additional check for all security updates
+                local all_security_updates
+                all_security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -c "^[A-Z]" || echo "0")
+                if [ "$all_security_updates" -gt 0 ]; then
+                    log_info "Total security updates available: $all_security_updates"
+                fi
             else
-                log_success "No critical/important security updates found"
-            fi
-            
-            # Additional check for all security updates
-            local all_security_updates
-            all_security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -c "^[A-Z]" || echo "0")
-            if [ "$all_security_updates" -gt 0 ]; then
-                log_info "Total security updates available: $all_security_updates"
+                log_info "updateinfo not available on this system (normal for some repositories)"
             fi
             ;;
         *)
@@ -262,6 +293,10 @@ check_package_vulnerabilities() {
 auto_install_packages() {
     local distro_id=""
     local pkg_manager=""
+    
+    if [ "$VERBOSE" = "1" ]; then
+        log_verbose "=== Starting package installation ==="
+    fi
     
     # Определить дистрибутив
     if [ -f /etc/os-release ]; then
@@ -289,6 +324,11 @@ auto_install_packages() {
     log_info "Detected distribution: $distro_id"
     log_info "Using package manager: $pkg_manager"
     
+    if [ "$VERBOSE" = "1" ]; then
+        log_verbose "Distribution: $distro_id"
+        log_verbose "Package manager: $pkg_manager"
+    fi
+    
     # Список пакетов для установки по дистрибутивам
     local packages_debian="jq lynis tuned mysqltuner gnuplot sysbench sysstat atop psmisc curl wget debsecan"
     local packages_rhel="jq lynis tuned mysqltuner gnuplot sysbench sysstat atop psmisc curl wget"
@@ -302,7 +342,7 @@ auto_install_packages() {
         
         # Check if EPEL is already installed
         local epel_version_before
-        epel_version_before=$(get_package_version "epel-release" "$pkg_manager")
+        epel_version_before=$(get_package_version "epel-release" "$pkg_manager" || echo "unknown")
         
         if [ -n "$epel_version_before" ] && [ "$epel_version_before" != "unknown" ]; then
             log_info "EPEL repository already installed (version: $epel_version_before)"
@@ -310,7 +350,7 @@ auto_install_packages() {
         else
             if $pkg_manager install -y epel-release; then
                 local epel_version_after
-                epel_version_after=$(get_package_version "epel-release" "$pkg_manager")
+                epel_version_after=$(get_package_version "epel-release" "$pkg_manager" || echo "unknown")
                 log_success "EPEL repository installed successfully (version: $epel_version_after)"
                 track_package_install "epel-release" "installed" "$epel_version_after"
             else
@@ -322,6 +362,19 @@ auto_install_packages() {
     
     # Установка основных пакетов
     log_info "Installing main packages..."
+    
+    if [ "$VERBOSE" = "1" ]; then
+        log_verbose "DEBUG: Entering main packages installation loop"
+        case "$distro_id" in
+            "ubuntu"|"debian")
+                log_verbose "Packages to install: $packages_debian"
+                ;;
+            "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+                log_verbose "Packages to install: $packages_rhel"
+                ;;
+        esac
+    fi
+    
     case "$distro_id" in
         "ubuntu"|"debian")
             log_info "Updating package lists..."
@@ -333,7 +386,7 @@ auto_install_packages() {
                 # Track each package individually
                 for package in $packages_debian; do
                     local version
-                    version=$(get_package_version "$package" "$pkg_manager")
+                    version=$(get_package_version "$package" "$pkg_manager" || echo "unknown")
                     track_package_install "$package" "installed" "$version"
                 done
             else
@@ -351,7 +404,7 @@ auto_install_packages() {
                 # Track each package individually
                 for package in $packages_rhel; do
                     local version
-                    version=$(get_package_version "$package" "$pkg_manager")
+                    version=$(get_package_version "$package" "$pkg_manager" || echo "unknown")
                     track_package_install "$package" "installed" "$version"
                 done
             else
