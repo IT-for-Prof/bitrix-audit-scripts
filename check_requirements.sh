@@ -218,6 +218,44 @@ auto_install_packages() {
             ;;
     esac
     
+    # Install Percona Toolkit manually for RHEL-family
+    if [[ "$distro_id" =~ ^(almalinux|rocky|centos|rhel|fedora)$ ]]; then
+        local pt_tools=("pt-query-digest" "pt-mysql-summary" "pt-variable-advisor" "pt-duplicate-key-checker" "pt-index-usage")
+        local pt_found=0
+        for tool in "${pt_tools[@]}"; do
+            if command -v "$tool" >/dev/null 2>&1; then
+                pt_found=1
+                break
+            fi
+        done
+        
+        if [ "$pt_found" -eq 0 ]; then
+            log_info "Installing Percona Toolkit..."
+            # Download and install Percona Toolkit RPM
+            local percona_rpm_url="https://repo.percona.com/yum/percona-release-latest.noarch.rpm"
+            local percona_toolkit_rpm="percona-toolkit-3.5.5-1.el9.noarch.rpm"
+            
+            # Install Percona repository
+            $pkg_manager install -y "$percona_rpm_url"
+            
+            # Enable tools repository
+            percona-release enable tools release
+            
+            # Install percona-toolkit
+            $pkg_manager install -y percona-toolkit
+            
+            log_success "Percona Toolkit installed successfully"
+        fi
+    fi
+    
+    # Install testssl.sh manually
+    if ! command -v testssl.sh >/dev/null 2>&1; then
+        log_info "Installing testssl.sh..."
+        curl -o /usr/local/bin/testssl.sh https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh
+        chmod +x /usr/local/bin/testssl.sh
+        log_success "testssl.sh installed successfully"
+    fi
+    
     # Вызвать setup_monitoring.sh для настройки мониторинга
     if [ -f "$SCRIPT_DIR/setup_monitoring.sh" ]; then
         log_info "Running monitoring setup script..."
@@ -308,7 +346,7 @@ get_install_hint() {
             if [ "$PKG_MANAGER" = "apt-get" ]; then
                 echo "apt-get install percona-toolkit"
             else
-                echo "dnf install percona-toolkit (requires Percona repo)"
+                echo "Manual install: download RPM from percona.com or setup Percona repo"
             fi
             ;;
         "tuned")
@@ -1513,7 +1551,7 @@ check_additional_tools() {
         log_warning "Percona Toolkit not found - advanced MySQL analysis will be limited"
         log "  Install: apt-get install percona-toolkit (Debian/Ubuntu)"
         log "  Or: yum install percona-toolkit (CentOS/RHEL)"
-        MISSING_RECOMMENDED+=("MySQL Tools|Percona Toolkit|$(get_install_hint 'percona-toolkit' 'Percona Toolkit')")
+        MISSING_CRITICAL+=("MySQL Tools|Percona Toolkit|$(get_install_hint 'percona-toolkit' 'Percona Toolkit')")
         echo ""
     fi
     
@@ -1544,7 +1582,7 @@ check_additional_tools() {
     
     if ! check_command "testssl.sh" "testssl.sh (SSL testing)"; then
         log_warning "testssl.sh not found - SSL testing will be limited"
-        MISSING_RECOMMENDED+=("Report Tools|testssl.sh|$(get_install_hint 'testssl' 'testssl.sh')")
+        MISSING_CRITICAL+=("Report Tools|testssl.sh|$(get_install_hint 'testssl' 'testssl.sh')")
         echo ""
     fi
     
