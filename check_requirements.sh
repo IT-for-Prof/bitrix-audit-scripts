@@ -507,6 +507,8 @@ auto_install_packages() {
         log_info "Installing testssl.sh..."
         if curl -o /usr/local/bin/testssl.sh https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh; then
             if chmod +x /usr/local/bin/testssl.sh; then
+                # Update command hash cache to make testssl.sh available immediately
+                hash -r
                 log_success "testssl.sh installed successfully"
                 track_package_install "testssl.sh" "installed" "latest"
             else
@@ -518,6 +520,8 @@ auto_install_packages() {
             track_package_install "testssl.sh" "failed" "unknown"
         fi
     else
+        # Update command hash cache to ensure testssl.sh is found
+        hash -r
         log_info "testssl.sh already installed"
         track_package_install "testssl.sh" "skipped" "existing"
     fi
@@ -2055,6 +2059,7 @@ check_security_tools() {
     fi
     
     # Check lynis (common for all)
+    echo ""
     log "--- Security Analysis Tools ---"
     if ! check_command "lynis" "Lynis (comprehensive security audit tool)"; then
         log_warning "lynis not found - advanced security analysis will be limited"
@@ -2103,6 +2108,7 @@ check_security_tools() {
     esac
     
     # Check curl/wget for API access (common for all)
+    echo ""
     log "--- API Access Tools ---"
     if ! check_command "curl" "curl (HTTP client for API requests)"; then
         if ! check_command "wget" "wget (HTTP client for API requests)"; then
@@ -2121,6 +2127,7 @@ check_security_tools() {
     fi
     
     # Check firewall tools (common for all)
+    echo ""
     log "--- Firewall Tools ---"
     local firewall_found=0
     if check_command "ufw" "UFW (Uncomplicated Firewall)"; then
@@ -2160,6 +2167,7 @@ check_additional_tools() {
     local missing=0
     
     # MySQL tools
+    echo ""
     log "--- MySQL Tools ---"
     if ! check_command "mysqltuner" "MySQLTuner (MySQL configuration analyzer)"; then
         log_warning "mysqltuner not found - MySQL configuration analysis will be limited"
@@ -2188,6 +2196,7 @@ check_additional_tools() {
     fi
     
     # Tuned
+    echo ""
     log "--- System Tuning ---"
     if ! check_command "tuned-adm" "tuned-adm (system tuning)"; then
         log_warning "tuned-adm not found - system tuning analysis will be limited"
@@ -2207,6 +2216,7 @@ check_additional_tools() {
     fi
     
     # SSL tools
+    echo ""
     log "--- SSL/Security Tools ---"
     if ! check_command "openssl" "OpenSSL (SSL analysis)"; then
         log_warning "openssl not found - SSL analysis will be limited"
@@ -2219,6 +2229,7 @@ check_additional_tools() {
     fi
     
     # HTML/PDF generation tools
+    echo ""
     log "--- Report Generation Tools ---"
     if ! check_command "wkhtmltopdf" "wkhtmltopdf (PDF generation)"; then
         log_warning "wkhtmltopdf not found - PDF report generation will be limited"
