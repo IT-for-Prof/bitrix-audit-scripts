@@ -1,0 +1,157 @@
+# Bitrix24 Audit Configuration File
+# Copy this file to audit.conf and modify as needed
+
+# ===== MODULE ENABLEMENT =====
+# Which modules to include (1=enabled, 0=disabled)
+ENABLE_NGINX=1
+ENABLE_APACHE=1
+ENABLE_MYSQL=1
+ENABLE_PHP=1
+ENABLE_REDIS=1
+ENABLE_SYSTEM=1
+ENABLE_ATOP=1          # Will be automatically skipped if atop not installed
+ENABLE_SAR=1           # Will be automatically skipped if sysstat not installed
+ENABLE_CRON=1
+ENABLE_ERROR_ANALYSIS=1
+ENABLE_BITRIX=1
+
+# ===== GENERAL SETTINGS =====
+# Audit directory (default: /root/audit)
+AUDIT_DIR=/root/audit
+
+# Execution mode
+PARALLEL_EXECUTION=0   # 1=parallel, 0=sequential
+CLEANUP_AFTER_ARCHIVE=1
+KEEP_LAST_N_ARCHIVES=5
+
+# ===== LOCALE SETTINGS =====
+# Critical for proper date parsing from atop/sysstat and other tools
+# Prefer en_US.UTF-8 for predictable parsing, ru_RU.UTF-8 for Russian date display
+# These are handled automatically by audit_common.sh, but can be overridden here
+# PREFERRED_LANG="en_US.UTF-8"
+# PREFERRED_LC_TIME="ru_RU.UTF-8"
+
+# ===== PERFORMANCE ANALYSIS SETTINGS =====
+# SAR (sysstat) settings
+SAR_FULL_DAY=1             # 1=entire day (00:00-23:59), 0=work window (uses SAR_START/SAR_END)
+SAR_START_TIME="08:00:00"  # Start of work window for sar (if SAR_FULL_DAY=0)
+SAR_END_TIME="19:00:00"    # End of work window for sar (if SAR_FULL_DAY=0)
+SAR_DAYS=7                 # Number of days to analyze
+
+# ATOP settings
+ATOP_FULL_DAY=1            # 1=entire day, 0=work window (uses ATOP_START/ATOP_END)
+ATOP_START_TIME="09:00"    # Start of work window for atop (if ATOP_FULL_DAY=0)
+ATOP_END_TIME="19:00"      # End of work window for atop (if ATOP_FULL_DAY=0)
+
+# Error analysis settings
+ERROR_ANALYSIS_DAYS=7      # Number of days for error log analysis
+
+# ===== BITRIX-SPECIFIC COMPONENTS =====
+# These will be automatically skipped if not found
+ENABLE_PUSH_SERVER=1       # Check push-server
+ENABLE_SPHINX=1            # Check sphinx/manticore
+ENABLE_MEMCACHED=1         # Check memcached
+ENABLE_COMPOSITE_CACHE=1   # Analyze Bitrix composite cache
+
+# ===== NGINX SPECIFIC SETTINGS =====
+NGINX_SAVE_CERT_CHAIN=0    # Save SSL certificate chain (can be large)
+
+# ===== MYSQL SPECIFIC SETTINGS =====
+MYSQL_TIMEOUT=30           # MySQL connection timeout in seconds
+
+# ===== REDIS SPECIFIC SETTINGS =====
+REDIS_TIMEOUT=10           # Redis connection timeout in seconds
+
+# ===== SYSTEM SPECIFIC SETTINGS =====
+SYSTEM_CHECK_DISKS=1       # Check disk health with smartctl
+SYSTEM_CHECK_NETWORK=1     # Check network interfaces
+SYSTEM_CHECK_MEMORY=1      # Check memory usage
+
+# ===== LOGGING SETTINGS =====
+LOG_LEVEL=INFO             # DEBUG, INFO, WARNING, ERROR
+LOG_ROTATION=1             # Enable log rotation
+LOG_MAX_SIZE=100M          # Maximum log file size
+LOG_MAX_FILES=5            # Maximum number of log files to keep
+
+# ===== ARCHIVE SETTINGS =====
+ARCHIVE_FORMAT=tgz         # Archive format (tgz, tar, zip)
+ARCHIVE_COMPRESSION=9      # Compression level (1-9)
+ARCHIVE_EXCLUDE_PATTERNS="*.log,*.tmp,*.swp"  # Patterns to exclude from archives
+
+# ===== NOTIFICATION SETTINGS =====
+# Email notifications (optional)
+# EMAIL_ENABLED=0
+# EMAIL_SMTP_SERVER="smtp.example.com"
+# EMAIL_SMTP_PORT=587
+# EMAIL_SMTP_USER="audit@example.com"
+# EMAIL_SMTP_PASS="password"
+# EMAIL_TO="admin@example.com"
+# EMAIL_FROM="audit@example.com"
+
+# ===== ADVANCED SETTINGS =====
+# Custom paths (if different from defaults)
+# NGINX_CONFIG_PATH="/etc/nginx/nginx.conf"
+# APACHE_CONFIG_PATH="/etc/apache2/apache2.conf"
+# MYSQL_CONFIG_PATH="/etc/mysql/my.cnf"
+# PHP_CONFIG_PATH="/etc/php/7.4/fpm/php.ini"
+# REDIS_CONFIG_PATH="/etc/redis/redis.conf"
+
+# Custom thresholds
+# CPU_BUSY_PCT=75           # CPU busy percentage threshold
+# MEMORY_USAGE_PCT=80       # Memory usage percentage threshold
+# DISK_USAGE_PCT=85         # Disk usage percentage threshold
+# NETWORK_ERROR_THRESHOLD=10 # Network error threshold
+
+# Timeout settings
+# COMMAND_TIMEOUT=300       # Default command timeout in seconds
+# HTTP_TIMEOUT=30           # HTTP request timeout in seconds
+# DATABASE_TIMEOUT=60       # Database operation timeout in seconds
+
+# ===== BITRIX CACHE ANALYSIS SETTINGS =====
+# Cache analysis thresholds
+BITRIX_CACHE_MAX_AGE_DAYS=30        # Maximum age of files to consider "old" (days)
+BITRIX_CACHE_WARNING_SIZE_GB=5      # Warning threshold for cache size (GB)
+BITRIX_CACHE_CRITICAL_SIZE_GB=10    # Critical threshold for cache size (GB)
+BITRIX_CACHE_DISK_PCT_CRITICAL=20   # Critical disk usage percentage
+
+# Bitrix paths (auto-detected, but can be overridden)
+# BITRIX_WWW_PATH="/home/bitrix/www"
+# BITRIX_EXT_WWW_PATH="/home/bitrix/ext_www"
+
+# Cache analysis options
+BITRIX_ANALYZE_UPLOAD=1             # 1=analyze upload directories, 0=skip
+BITRIX_INCLUDE_FILE_TYPES=1         # 1=analyze file types, 0=skip
+BITRIX_MAX_FILES_PER_DIR=10000      # Maximum files to analyze per directory
+
+# ===== DEBUGGING =====
+# Debug mode (enables verbose output)
+DEBUG=0                    # 1=enabled, 0=disabled
+VERBOSE=0                  # 1=enabled, 0=disabled
+DRY_RUN=0                  # 1=enabled, 0=disabled (simulate without executing)
+
+# ===== EXAMPLES =====
+# Example 1: Run only performance analysis modules
+# ENABLE_NGINX=0
+# ENABLE_APACHE=0
+# ENABLE_MYSQL=0
+# ENABLE_PHP=0
+# ENABLE_REDIS=0
+# ENABLE_SYSTEM=0
+# ENABLE_CRON=0
+# ENABLE_ERROR_ANALYSIS=0
+# ENABLE_ATOP=1
+# ENABLE_SAR=1
+
+# Example 2: Run in parallel mode with custom time windows
+# PARALLEL_EXECUTION=1
+# SAR_FULL_DAY=0
+# SAR_START_TIME="09:00:00"
+# SAR_END_TIME="18:00:00"
+# ATOP_FULL_DAY=0
+# ATOP_START_TIME="09:00"
+# ATOP_END_TIME="18:00"
+
+# Example 3: Extended analysis with more days
+# SAR_DAYS=14
+# ERROR_ANALYSIS_DAYS=14
+# KEEP_LAST_N_ARCHIVES=10

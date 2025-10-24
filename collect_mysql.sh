@@ -9,10 +9,35 @@
  # re-exec using a minimal env and `bash --noprofile --norc` so the script runs
  # deterministically in automation systems (cron, systemd, CI).
  set -euo pipefail
- if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
-   exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color BASH_ENV= _STERILE=1 \
-     bash --noprofile --norc "$0" "$@"
- fi
+if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
+  # Determine best available locale for sterile environment
+  _detect_locale() {
+    if locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+      echo "en_US.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+      echo "en_US.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.UTF-8$'; then
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.utf8$'; then
+      echo "ru_RU.utf8"
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+      echo "C.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.utf8$'; then
+      echo "C.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^POSIX$'; then
+      echo "POSIX"
+    else
+      echo "C"
+    fi
+  }
+  
+  _LOCALE="$(_detect_locale)"
+  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color \
+    LANG="$_LOCALE" LANGUAGE="$_LOCALE" \
+    BASH_ENV= _STERILE=1 \
+    bash --noprofile --norc "$0" "$@"
+fi
 set -euo pipefail
 IFS=$'\n\t'
 # Default base and per-service workdir. Avoid referencing ROOT_DIR before it's defined
@@ -26,61 +51,25 @@ WORKDIR="${WORKDIR:-${HOME}/mysql_audit}"
 type section >/dev/null 2>&1 || section(){ echo; echo "==== $* ===="; }
 
 # -------- Settings --------
-# Avoid exporting LC_ALL/LANG globally; use per-process LANGUAGE/LC_TIME policy below.
-# Keep LOCALE var for reference but do not export LC_ALL to avoid setlocale warnings.
-LOCALE=${LOCALE:-ru_RU.UTF-8}
+# Use shared audit_common.sh for locale management
+source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 
-# Ensure per-process LC_TIME for consistent time formatting (do not modify system-wide settings)
-# Prefer ru_RU.UTF-8, fall back to en_US.UTF-8, then en_US:en, then C if needed.
-# LANGUAGE and LC_TIME policy (do not modify system-wide settings)
-# - Ensure commands inside the script run with LANGUAGE=en_US.UTF-8 (fallback en_US:en)
-# - Ensure LC_TIME=ru_RU.UTF-8 when available; if ru isn't available, try to ensure
-#   LANGUAGE is en_US.UTF-8 (fallback en_US:en) and use an en_US LC_TIME if needed.
+# Setup locale using common functions
+setup_locale
 
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
-
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-# Determine per-command LANGUAGE and LC_TIME without exporting system-wide
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do
-  if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi
-done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "================================================" >&2
+    echo "ВНИМАНИЕ: Скрипт запущен БЕЗ root-прав" >&2
+    echo "Некоторые данные будут недоступны:" >&2
+    echo "  - Логи в /var/log/mysql/" >&2
+    echo "  - Конфигурации в /etc/mysql/" >&2
+    echo "  - Системные команды (smartctl, dmidecode)" >&2
+    echo "Для полного аудита запустите: sudo $0 $*" >&2
+    echo "================================================" >&2
+    echo ""
 fi
 
-SCRIPT_LC_TIME=""
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
-  else SCRIPT_LC_TIME=C
-  fi
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-    SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
-fi
-
-# with_locale runs a single command with the chosen LANGUAGE and LC_TIME
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
 export TZ=${TZ:-Europe/Nicosia}
 
 BASE=${BASE:-${HOME}}                # каталог запуска; по-умолчанию $HOME
@@ -118,7 +107,6 @@ run() { # печать заголовка + выполнение команды 
 # Standard OUT_DIR and central audit dir
 OUT_DIR="${OUT_DIR:-${WORKDIR}}"
 mkdir -p "$OUT_DIR"/{conf,logs,sql,tooling} 2>/dev/null || true
-source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 run_sh(){ # «как есть», но безопасно: ошибки не валят скрипт
   local title="$1"; shift
   printf '==== %s ====\n' "$title" | tee -a "$OUT"
@@ -213,6 +201,23 @@ else
 fi
 divider | tee -a "$OUT" >/dev/null
 
+# -------- Deadlocks & Metadata locks --------
+# Deadlock information (последние deadlock из INNODB STATUS)
+printf '==== %s ====\n' "Recent deadlocks (from INNODB STATUS)" | tee -a "$OUT"
+mysql "${MYSQL_OPTS[@]}" -e "SHOW ENGINE INNODB STATUS\\G" </dev/null 2>/dev/null | \
+  awk '/LATEST DETECTED DEADLOCK/,/^---/' | sed -n "1,100p" | tee -a "$OUT" || true
+divider | tee -a "$OUT" >/dev/null
+
+# Metadata locks (если performance_schema включен)
+if "${MYSQL_BIN:-mysql}" "${MYSQL_OPTS[@]:-}" -N -e "SELECT 1 FROM performance_schema.metadata_locks LIMIT 1;" </dev/null >/dev/null 2>&1; then
+  run_mysql "Metadata locks (current)" "
+  SELECT OBJECT_TYPE, OBJECT_SCHEMA, OBJECT_NAME, LOCK_TYPE, LOCK_DURATION, LOCK_STATUS
+  FROM performance_schema.metadata_locks
+  WHERE OBJECT_SCHEMA NOT IN ('mysql', 'performance_schema', 'information_schema', 'sys')
+  LIMIT 50;
+  "
+fi
+
 # -------- PROCESSLIST (без подвисаний) --------
 printf '==== %s ====\n' "SHOW FULL PROCESSLIST (first ${PROCESSLIST_LINES})" | tee -a "$OUT"
 mysql "${MYSQL_OPTS[@]}" --connect-timeout=5 -e "SHOW FULL PROCESSLIST" </dev/null \
@@ -290,6 +295,34 @@ else
   divider | tee -a "$OUT" >/dev/null
 fi
 
+# -------- Long running queries & Table scans --------
+# Долгие запросы (активные > 5 секунд)
+run_mysql "Long running queries (>5 sec)" "
+SELECT
+  ID, USER, HOST, DB, COMMAND, TIME, STATE,
+  LEFT(INFO, 200) AS QUERY_PREVIEW
+FROM information_schema.PROCESSLIST
+WHERE COMMAND != 'Sleep'
+  AND TIME > 5
+ORDER BY TIME DESC
+LIMIT 30;
+"
+
+# Table scans (full scans without indexes)
+run_mysql "Queries with table scans (no index used)" "
+SELECT
+  DIGEST_TEXT,
+  COUNT_STAR AS exec_count,
+  SUM_NO_INDEX_USED AS no_index_count,
+  SUM_NO_GOOD_INDEX_USED AS no_good_index_count,
+  ROUND(SUM_TIMER_WAIT/1000000000000, 2) AS total_time_sec,
+  ROUND(AVG_TIMER_WAIT/1000000000000, 3) AS avg_time_sec
+FROM performance_schema.events_statements_summary_by_digest
+WHERE SUM_NO_INDEX_USED > 0 OR SUM_NO_GOOD_INDEX_USED > 0
+ORDER BY SUM_NO_INDEX_USED DESC, SUM_TIMER_WAIT DESC
+LIMIT 20;
+"
+
 # -------- Логи --------
 SLOW="/var/lib/mysql-files/mysql-slow.log"
 GEN="/var/lib/mysql-files/mysql.log"
@@ -340,6 +373,37 @@ if have mysqltuner; then
     mysqltuner --silent --forcemem --forceswap > "${WORKDIR}/tooling/mysqltuner.txt" 2>&1 || true
     sed -n "1,120p" "${WORKDIR}/tooling/mysqltuner.txt" | tee -a "$OUT" || true
   fi
+  divider | tee -a "$OUT" >/dev/null
+fi
+
+# -------- Percona Toolkit: Index & Configuration Analysis --------
+# pt-duplicate-key-checker - поиск дублирующихся и избыточных индексов
+if have pt-duplicate-key-checker; then
+  printf '==== %s ====\n' "pt-duplicate-key-checker (duplicate/redundant indexes)" | tee -a "$OUT"
+  if have timeout; then
+    if timeout "${HARD_TIMEOUT}s" pt-duplicate-key-checker --host localhost > "${WORKDIR}/tooling/pt-duplicate-key-checker.txt" 2>&1; then
+      sed -n "1,300p" "${WORKDIR}/tooling/pt-duplicate-key-checker.txt" | tee -a "$OUT" || true
+    else
+      echo "[warn] pt-duplicate-key-checker timeout or error" | tee -a "$OUT"
+    fi
+  else
+    pt-duplicate-key-checker --host localhost > "${WORKDIR}/tooling/pt-duplicate-key-checker.txt" 2>&1 || true
+    sed -n "1,300p" "${WORKDIR}/tooling/pt-duplicate-key-checker.txt" | tee -a "$OUT" || true
+  fi
+  divider | tee -a "$OUT" >/dev/null
+fi
+
+# pt-variable-advisor - рекомендации по MySQL переменным
+if have pt-variable-advisor; then
+  printf '==== %s ====\n' "pt-variable-advisor (configuration recommendations)" | tee -a "$OUT"
+  pt-variable-advisor --host localhost 2>&1 | sed -n "1,200p" | tee -a "$OUT" || true
+  divider | tee -a "$OUT" >/dev/null
+fi
+
+# pt-index-usage - статистика использования индексов (из slow log если доступен)
+if have pt-index-usage && [ -f "$SLOW" ]; then
+  printf '==== %s ====\n' "pt-index-usage (index usage from slow log)" | tee -a "$OUT"
+  pt-index-usage "$SLOW" --host localhost 2>&1 | sed -n "1,200p" | tee -a "$OUT" || true
   divider | tee -a "$OUT" >/dev/null
 fi
 
@@ -531,14 +595,27 @@ SELECT
 "
 
 # 15) SQL modes / timeouts
-run_mysql "SQL modes / Timeouts" "
+run_mysql "SQL modes / Timeouts / Network" "
 SELECT
   @@sql_mode                       AS sql_mode,
   @@transaction_isolation          AS tx_isolation,
   @@innodb_flush_log_at_trx_commit AS innodb_flush_log_at_trx_commit,
   @@sync_binlog                    AS sync_binlog,
   @@wait_timeout                   AS wait_timeout,
-  @@interactive_timeout            AS interactive_timeout;
+  @@interactive_timeout            AS interactive_timeout,
+  @@connect_timeout                AS connect_timeout,
+  @@net_read_timeout               AS net_read_timeout,
+  @@net_write_timeout              AS net_write_timeout,
+  @@lock_wait_timeout              AS lock_wait_timeout,
+  @@innodb_lock_wait_timeout       AS innodb_lock_wait_timeout;
+"
+
+# 15b) Query execution limits (MySQL 5.7.8+) and replication timeout
+run_mysql "Query execution limits & Replication timeout" "
+SELECT
+  @@max_execution_time             AS max_execution_time_global,
+  @@SESSION.max_execution_time     AS max_execution_time_session,
+  @@slave_net_timeout              AS slave_net_timeout;
 "
 
 # 16) Репликация (если есть права/настроена)
@@ -593,8 +670,131 @@ ORDER BY NAME;
 
 # ================================================================================
 
+# -------- ДОПОЛНИТЕЛЬНЫЕ ИНСТРУМЕНТЫ MYSQL --------
 
-# -------- Упаковка --------
+# MySQLTuner
+if have mysqltuner; then
+  run_sh "MySQLTuner анализ" mysqltuner --silent
+  # Сохраняем вывод mysqltuner в отдельный файл для анализа
+  mysqltuner --silent > "${OUT_DIR}/tooling/mysqltuner.txt" 2>&1 || true
+  echo "MySQLTuner отчет сохранен в: ${OUT_DIR}/tooling/mysqltuner.txt" | tee -a "$OUT"
+else
+  echo "==== MySQLTuner анализ ====" | tee -a "$OUT"
+  echo "[INFO] MySQLTuner не установлен - рекомендуется для анализа конфигурации MySQL" | tee -a "$OUT"
+  echo "Установка: apt-get install mysqltuner (Debian/Ubuntu) или скачать с https://github.com/major/MySQLTuner-perl" | tee -a "$OUT"
+fi
+
+# Percona Toolkit - pt-query-digest
+if have pt-query-digest; then
+  echo "==== pt-query-digest анализ ====" | tee -a "$OUT"
+  
+  # Ищем slow query log
+  SLOW_LOG=""
+  if mysql "${MYSQL_OPTS[@]}" -e "SELECT @@slow_query_log_file;" 2>/dev/null | grep -v "@@slow_query_log_file" | grep -v "^$" | head -1 | read -r log_file; then
+    if [ -r "$log_file" ]; then
+      SLOW_LOG="$log_file"
+    fi
+  fi
+  
+  # Также проверяем стандартные пути
+  for log_path in /var/log/mysql/slow.log /var/log/mysql/mysql-slow.log /var/log/mysqld.log; do
+    if [ -r "$log_path" ]; then
+      SLOW_LOG="$log_path"
+      break
+    fi
+  done
+  
+  if [ -n "$SLOW_LOG" ]; then
+    echo "Анализ slow query log: $SLOW_LOG" | tee -a "$OUT"
+    pt-query-digest "$SLOW_LOG" > "${OUT_DIR}/tooling/pt_query_digest.txt" 2>&1 || true
+    echo "pt-query-digest отчет сохранен в: ${OUT_DIR}/tooling/pt_query_digest.txt" | tee -a "$OUT"
+    
+    # Показываем топ-5 медленных запросов
+    echo "Топ-5 медленных запросов:" | tee -a "$OUT"
+    head -50 "${OUT_DIR}/tooling/pt_query_digest.txt" | tee -a "$OUT"
+  else
+    echo "[INFO] Slow query log не найден или недоступен для чтения" | tee -a "$OUT"
+    echo "Рекомендуется включить slow_query_log для анализа производительности" | tee -a "$OUT"
+  fi
+else
+  echo "==== pt-query-digest анализ ====" | tee -a "$OUT"
+  echo "[INFO] pt-query-digest не установлен - рекомендуется для анализа медленных запросов" | tee -a "$OUT"
+  echo "Установка: apt-get install percona-toolkit (Debian/Ubuntu)" | tee -a "$OUT"
+fi
+
+# Percona Toolkit - pt-mysql-summary
+if have pt-mysql-summary; then
+  run_sh "pt-mysql-summary анализ" pt-mysql-summary
+  # Сохраняем вывод pt-mysql-summary в отдельный файл
+  pt-mysql-summary > "${OUT_DIR}/tooling/pt_mysql_summary.txt" 2>&1 || true
+  echo "pt-mysql-summary отчет сохранен в: ${OUT_DIR}/tooling/pt_mysql_summary.txt" | tee -a "$OUT"
+else
+  echo "==== pt-mysql-summary анализ ====" | tee -a "$OUT"
+  echo "[INFO] pt-mysql-summary не установлен - рекомендуется для комплексного анализа MySQL" | tee -a "$OUT"
+  echo "Установка: apt-get install percona-toolkit (Debian/Ubuntu)" | tee -a "$OUT"
+fi
+
+# Percona Toolkit - pt-variable-advisor
+if have pt-variable-advisor; then
+  run_sh "pt-variable-advisor анализ" pt-variable-advisor
+  # Сохраняем вывод pt-variable-advisor в отдельный файл
+  pt-variable-advisor > "${OUT_DIR}/tooling/pt_variable_advisor.txt" 2>&1 || true
+  echo "pt-variable-advisor отчет сохранен в: ${OUT_DIR}/tooling/pt_variable_advisor.txt" | tee -a "$OUT"
+else
+  echo "==== pt-variable-advisor анализ ====" | tee -a "$OUT"
+  echo "[INFO] pt-variable-advisor не установлен - рекомендуется для проверки переменных MySQL" | tee -a "$OUT"
+  echo "Установка: apt-get install percona-toolkit (Debian/Ubuntu)" | tee -a "$OUT"
+fi
+
+# Percona Toolkit - pt-duplicate-key-checker
+if have pt-duplicate-key-checker; then
+  run_sh "pt-duplicate-key-checker анализ" pt-duplicate-key-checker
+  # Сохраняем вывод pt-duplicate-key-checker в отдельный файл
+  pt-duplicate-key-checker > "${OUT_DIR}/tooling/pt_duplicate_key_checker.txt" 2>&1 || true
+  echo "pt-duplicate-key-checker отчет сохранен в: ${OUT_DIR}/tooling/pt_duplicate_key_checker.txt" | tee -a "$OUT"
+else
+  echo "==== pt-duplicate-key-checker анализ ====" | tee -a "$OUT"
+  echo "[INFO] pt-duplicate-key-checker не установлен - рекомендуется для поиска дублирующихся индексов" | tee -a "$OUT"
+  echo "Установка: apt-get install percona-toolkit (Debian/Ubuntu)" | tee -a "$OUT"
+fi
+
+# Percona Toolkit - pt-index-usage
+if have pt-index-usage; then
+  echo "==== pt-index-usage анализ ====" | tee -a "$OUT"
+  echo "[INFO] pt-index-usage требует времени для анализа - запускаем в фоне" | tee -a "$OUT"
+  # pt-index-usage может работать долго, поэтому запускаем с таймаутом
+  timeout 300 pt-index-usage > "${OUT_DIR}/tooling/pt_index_usage.txt" 2>&1 || true
+  if [ -s "${OUT_DIR}/tooling/pt_index_usage.txt" ]; then
+    echo "pt-index-usage отчет сохранен в: ${OUT_DIR}/tooling/pt_index_usage.txt" | tee -a "$OUT"
+    echo "Топ-10 неиспользуемых индексов:" | tee -a "$OUT"
+    head -20 "${OUT_DIR}/tooling/pt_index_usage.txt" | tee -a "$OUT"
+  else
+    echo "[INFO] pt-index-usage не смог завершиться за 5 минут или не нашел данных" | tee -a "$OUT"
+  fi
+else
+  echo "==== pt-index-usage анализ ====" | tee -a "$OUT"
+  echo "[INFO] pt-index-usage не установлен - рекомендуется для анализа использования индексов" | tee -a "$OUT"
+  echo "Установка: apt-get install percona-toolkit (Debian/Ubuntu)" | tee -a "$OUT"
+fi
+
+# Сводка по дополнительным инструментам
+echo "==== Сводка дополнительных инструментов ====" | tee -a "$OUT"
+echo "Установленные инструменты:" | tee -a "$OUT"
+for tool in mysqltuner pt-query-digest pt-mysql-summary pt-variable-advisor pt-duplicate-key-checker pt-index-usage; do
+  if have "$tool"; then
+    echo "  ✓ $tool" | tee -a "$OUT"
+  else
+    echo "  ✗ $tool (рекомендуется установить)" | tee -a "$OUT"
+  fi
+done
+
+echo "" | tee -a "$OUT"
+echo "Рекомендации по установке дополнительных инструментов:" | tee -a "$OUT"
+echo "  Debian/Ubuntu: apt-get install mysqltuner percona-toolkit" | tee -a "$OUT"
+echo "  CentOS/RHEL: yum install mysqltuner percona-toolkit" | tee -a "$OUT"
+echo "  Или скачать MySQLTuner с: https://github.com/major/MySQLTuner-perl" | tee -a "$OUT"
+
+# ================================================================================
 printf '==== %s ====' "Pack results" | tee -a "$OUT"
 echo "" | tee -a "$OUT"
 echo "Workdir: ${WORKDIR}" | tee -a "$OUT"

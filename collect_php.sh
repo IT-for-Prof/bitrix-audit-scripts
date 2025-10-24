@@ -1,7 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
-  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color BASH_ENV= _STERILE=1 \
+  # Determine best available locale for sterile environment
+  _detect_locale() {
+    if locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+      echo "en_US.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+      echo "en_US.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.UTF-8$'; then
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.utf8$'; then
+      echo "ru_RU.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+      echo "C.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.utf8$'; then
+      echo "C.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^POSIX$'; then
+      echo "POSIX"
+    else
+      echo "C"
+    fi
+  }
+  
+  _LOCALE="$(_detect_locale)"
+  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color \
+    LANG="$_LOCALE" LANGUAGE="$_LOCALE" \
+    BASH_ENV= _STERILE=1 \
     bash --noprofile --norc "$0" "$@"
 fi
 
@@ -20,68 +44,26 @@ DISABLE_BITRIX_MENU=1
 export BX_NOMENU BITRIX_NO_MENU DISABLE_BITRIX_MENU
 
 ##### Locale / PATH / Pagers #####
-LOCALE="${LOCALE:-ru_RU.UTF-8}"
-# Do not export LC_ALL or LANG here (may not be installed) — we set per-process LANGUAGE and LC_TIME for commands
+# Use shared audit_common.sh for locale management
+source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 
-# Ensure per-process LC_TIME for consistent time formatting (do not modify system-wide settings)
-# Prefer ru_RU.UTF-8, fall back to en_US.UTF-8, then en_US:en, then C if needed.
-# LANGUAGE and LC_TIME policy (do not modify system-wide settings)
-# - Ensure commands inside the script run with LANGUAGE=en_US.UTF-8 (fallback en_US:en)
-# - Ensure LC_TIME=ru_RU.UTF-8 when available; if ru isn't available, try to ensure
-#   LANGUAGE is en_US.UTF-8 (fallback en_US:en) and use an en_US LC_TIME if needed.
+# Setup locale using common functions
+setup_locale
 
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
-
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-## Determine per-command LANGUAGE and LC_TIME without changing system/global env
-# SCRIPT_LANGUAGE: prefer en_US.UTF-8, fallback en_US:en
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do
-  if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi
-done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-
-# Notify if existing LANGUAGE differs from what we'll use
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
-fi
-
-# SCRIPT_LC_TIME: prefer ru_RU.UTF-8, otherwise fall back to an en_US LC_TIME
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  # ru_RU.UTF-8 unavailable — fall back to en_US for LC_TIME and ensure script LANGUAGE is en_US.*
-  if locale_has "en_US.UTF-8"; then
-    SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then
-    SCRIPT_LC_TIME="en_US:en"
-  else
-    SCRIPT_LC_TIME=C
-  fi
-  # If we didn't already plan to use an en_US LANGUAGE, switch to en_US.UTF-8 if available
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8";
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en";
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-    SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "================================================" >&2
+    echo "ВНИМАНИЕ: Скрипт запущен БЕЗ root-прав" >&2
+    echo "Некоторые данные будут недоступны:" >&2
+    echo "  - Логи в /var/log/" >&2
+    echo "  - Конфигурации в /etc/" >&2
+    echo "  - Системные команды (smartctl, dmidecode)" >&2
+    echo "Для полного аудита запустите: sudo $0 $*" >&2
+    echo "================================================" >&2
+    echo ""
 fi
 
 # with_locale will run commands with the chosen per-command LANGUAGE and LC_TIME
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
 SYSTEMD_PAGER=
 SYSTEMD_COLORS=0
 export SYSTEMD_PAGER SYSTEMD_COLORS
@@ -104,8 +86,6 @@ mkdir -p "$PROBE_DIR" "$PROBE_DIR/cmd" "$PROBE_DIR/files" "$PROBE_DIR/conf.d" "$
 mkdir -p "$PROBE_DIR/logs" 2>/dev/null || true
 # Timestamp for summaries
 TS="${TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-# Source shared helpers early so helper functions used by AUTO SUMMARY are available
-source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 
 # Timeouts and log limits (defaults)
 TIMEOUT_DEFAULT="5s"
@@ -687,203 +667,18 @@ fi
 
 # --------------------------------------------------
 # Bitrix: exception_handling block analysis
-# Collect per-site /bitrix/.settings.php and extract the
-# 'exception_handling' array values into compact artifacts
-# and a short summary included in the human summary.
+# NOTE: Bitrix-specific analysis has been moved to collect_bitrix.sh
+# This includes .settings.php analysis, exception_handling extraction,
+# cache analysis, and multi-site configuration support.
 # --------------------------------------------------
-hdr "Bitrix: exception_handling (if any)"
-BITRIX_OUT_DIR="$PROBE_DIR/bitrix"; mkdir -p "$BITRIX_OUT_DIR" 2>/dev/null || true
-
-# Candidate paths: per-installation files
-BITRIX_CANDIDATES=(/home/bitrix/www/bitrix/.settings.php /home/bitrix/ext_www/*/bitrix/.settings.php)
-found=0
-for p in "${BITRIX_CANDIDATES[@]}"; do
-  for f in $p; do
-    [ -f "$f" ] || continue
-    found=$((found+1))
-    # derive site name (best-effort)
-    parent1=$(dirname -- "$f")         # .../bitrix
-    parent2=$(dirname -- "$parent1")   # .../www or .../ext_www/<site>
-    site=$(basename -- "$parent2")
-    # normalize common www path to "www" (keeps unique)
-    [ -z "$site" ] && site="site${found}"
-
-    dst_base="$BITRIX_OUT_DIR/${site}"
-    mkdir -p "$BITRIX_OUT_DIR" 2>/dev/null || true
-    cp -a "$f" "$dst_base.settings.php" 2>/dev/null || true
-
-    # file metadata
-  _perm_owner=$(stat -c '%A %a %U:%G' "$f" 2>/dev/null || echo "N/A")
-    fsize=$(stat -c '%s' "$f" 2>/dev/null || echo 0)
-
-    # Extract exception_handling block values using PHP (timeout wrapper)
-    EH_OUT="$dst_base.exception_handling.txt"
-    EH_JSON="$dst_base.exception_handling.json"
-    # PHP snippet: include settings, find exception_handling and print specific keys in a simple key=value form
-    # Use heredoc PHP to avoid complex shell quoting. Write to a temp and split
-    TMP_EH="$EH_OUT.tmp"
-    with_locale php - "$f" <<'PHP' 2>/dev/null >"$TMP_EH" || true
-<?php
-$f = isset($argv[1]) ? $argv[1] : "";
-$s = @include $f;
-if (!is_array($s) && is_object($s)) $s = (array)$s;
-$e = null;
-if (is_array($s) && isset($s["exception_handling"])) {
-  $eh = $s["exception_handling"];
-  if (is_array($eh) && isset($eh["value"])) $e = $eh["value"]; else $e = $eh;
-}
-if (!$e) { exit(0); }
-$out = [];
-$out["debug"] = array_key_exists("debug", $e) ? var_export($e["debug"], true) : null;
-$out["handled_errors_types"] = array_key_exists("handled_errors_types", $e) ? var_export($e["handled_errors_types"], true) : null;
-$out["exception_errors_types"] = array_key_exists("exception_errors_types", $e) ? var_export($e["exception_errors_types"], true) : null;
-$out["ignore_silence"] = array_key_exists("ignore_silence", $e) ? var_export($e["ignore_silence"], true) : null;
-$out["assertion_throws_exception"] = array_key_exists("assertion_throws_exception", $e) ? var_export($e["assertion_throws_exception"], true) : null;
-$out["assertion_error_type"] = array_key_exists("assertion_error_type", $e) ? var_export($e["assertion_error_type"], true) : null;
-$logfile = null; $logsize = null;
-if (isset($e["log"]["settings"])) {
-  $ls = $e["log"]["settings"];
-  if (is_array($ls) && isset($ls["file"])) $logfile = $ls["file"];
-  if (is_array($ls) && isset($ls["log_size"])) $logsize = $ls["log_size"];
-}
-$out["log_file"] = $logfile;
-$out["log_size"] = $logsize;
-foreach ($out as $k => $v) {
-  if (is_null($v)) echo "$k=<missing>\n";
-  else echo "$k=" . trim($v, "'\"\n ") . "\n";
-}
-echo "--JSON-BEGIN--\n";
-echo json_encode($e, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
-PHP
-
-    # split temp into kv and json parts
-    awk 'BEGIN{json=0} /^--JSON-BEGIN--/{json=1; next} { if(!json) print > "'"$EH_OUT"'"; else print > "'"$EH_JSON"'" }' "$TMP_EH" || true
-    rm -f "$TMP_EH" 2>/dev/null || true
-
-    # If EH_OUT missing or empty, create a marker
-    if [ ! -s "$EH_OUT" ]; then echo "exception_handling=absent" > "$EH_OUT"; fi
-
-    # Inspect exception log path if provided
-    EH_LOG_PATH=$(grep -m1 '^log_file=' "$EH_OUT" 2>/dev/null | sed 's/^log_file=//' || true)
-    EH_LOG_PATH=${EH_LOG_PATH:-}
-
-    # settings file perms check (human and quick warn if world-readable/writable)
-    ss_mode=$(stat -c '%a' "$f" 2>/dev/null || echo "0")
-    ss_human=$(stat -c '%A %a %U:%G' "$f" 2>/dev/null || echo "N/A")
-    ss_warn="OK"
-    last_digit=${ss_mode: -1}
-    if [ "$last_digit" != "0" ]; then ss_warn="WARN: world perms"; fi
-
-    # Write a compact per-site summary into a per-site block file. We'll
-    # normalize and assemble blocks later to avoid duplicates and produce
-    # deterministic ordering.
-    # Determine canonical display name: prefer domain extracted from nginx config
-    SITE_PATH=$(realpath "$parent2" 2>/dev/null || printf '%s' "$parent2")
-    site_domain=""
-    NGINX_DIRS=(/etc/nginx /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/sites-available)
-    for nd in "${NGINX_DIRS[@]}"; do
-      [ -d "$nd" ] || continue
-      # look for files mentioning the site path; heuristic only
-      while IFS= read -r conf; do
-        [ -f "$conf" ] || continue
-        # try to extract a server_name from the file
-        sn=$(awk '/server_name/ { $1=""; sub(/^\s+/,""); gsub(/;$/,""); print; exit }' "$conf" 2>/dev/null || true)
-        if [ -n "$sn" ]; then
-          # take first token as canonical domain
-          dom=$(printf '%s' "$sn" | awk '{print $1}' 2>/dev/null || true)
-          if [ -n "$dom" ]; then site_domain="$dom"; break 2; fi
-        fi
-      done < <(grep -R --binary-files=without-match -lF "$SITE_PATH" "$nd" 2>/dev/null || true)
-    done
-
-    if [ -n "$site_domain" ]; then
-      display_name="$site (${site_domain})"
-    else
-      display_name="$SITE_PATH"
-    fi
-
-    block_file="$dst_base.summary.block.txt"
-    {
-  echo "#SITE_ID:$SITE_PATH";
-      echo "Bitrix site: $display_name";
-      echo "  settings_file: $f";
-      echo "  present: yes";
-      echo "  perms/owner: $ss_human";
-      echo "  perms_check: $ss_warn";
-      echo "  size_bytes: $fsize";
-      echo "  exception_handling (compact):";
-      sed -n '1,20p' "$EH_OUT" | sed 's/^/    /' 2>/dev/null || true;
-      echo "  exception_log_path: ${EH_LOG_PATH:-<none>}";
-
-      if [ -n "$EH_LOG_PATH" ]; then
-        if [ -f "$EH_LOG_PATH" ]; then
-          lf_info=$(stat -c '%A %a %U:%G %s' "$EH_LOG_PATH" 2>/dev/null || echo "N/A")
-          echo "  exception_log_present: yes";
-          echo "  exception_log_perms_owner_size: $lf_info";
-          # capture bounded tail of exception log into bitrix output dir
-          tail -n 200 "$EH_LOG_PATH" > "$BITRIX_OUT_DIR/${site}.exceptions.log.tail.txt" 2>/dev/null || true
-          if [ -f "$BITRIX_OUT_DIR/${site}.exceptions.log.tail.txt" ]; then
-            b=$(wc -c < "$BITRIX_OUT_DIR/${site}.exceptions.log.tail.txt" 2>/dev/null || echo 0)
-            if [ "$b" -gt "$LOG_COMPRESS_THRESHOLD" ]; then gzip -9f "$BITRIX_OUT_DIR/${site}.exceptions.log.tail.txt"; fi
-          fi
-        else
-          echo "  exception_log_present: no";
-        fi
-      fi
-
-    } > "$block_file"
-
-  done
-done
-if [ $found -eq 0 ]; then
-  echo "Bitrix: no /bitrix/.settings.php files found under /home/bitrix — skipping" > "$BITRIX_OUT_DIR/summary.txt"
-else
-  # Normalize site names, dedupe (keep first occurrence) and assemble final summary
-  # from per-site block files. Strategy: for each block, compute a normalized
-  # name and move the first-seen block to normalized_<name>.block.txt. Then
-  # concatenate normalized blocks in sorted order into summary.txt.
-  # remove any leftover normalized blocks from previous runs to avoid stale duplicates
-  rm -f "$BITRIX_OUT_DIR"/normalized_*.block.txt 2>/dev/null || true
-
-  found_blocks=0
-  for b in "$BITRIX_OUT_DIR"/*.summary.block.txt; do
-    [ -f "$b" ] || continue
-    found_blocks=1
-    # prefer machine SITE_ID tag if present
-    site_tag=$(awk -F: '/^#SITE_ID:/{print $2; exit}' "$b" 2>/dev/null || true)
-    site_name=$(printf '%s' "${site_tag:-}" | tr '[:upper:]' '[:lower:]')
-    if [ -z "$site_name" ]; then
-      header=$(sed -n '1p' "$b" 2>/dev/null | sed -E 's/^Bitrix site: //; s/[[:space:]]*$//')
-      site_name=$(printf '%s' "$header" | tr '[:upper:]' '[:lower:]')
-    fi
-    # map common 'www' or empty to 'main'
-    if [ -z "$site_name" ] || [ "$site_name" = "www" ] || [ "$site_name" = "site" ]; then
-      site_name="main"
-    fi
-    norm=$(printf '%s' "$site_name" | sed 's/[^a-z0-9._-]/_/g')
-    target="$BITRIX_OUT_DIR/normalized_${norm}.block.txt"
-    if [ ! -e "$target" ]; then
-      mv "$b" "$target" || cp -a "$b" "$target" || true
-    else
-      rm -f "$b" 2>/dev/null || true
-    fi
-  done
-
-  : > "$BITRIX_OUT_DIR/summary.txt"
-  if [ "$found_blocks" -eq 1 ]; then
-    # iterate normalized blocks safely
-    printf '%s\n' "$BITRIX_OUT_DIR"/normalized_*.block.txt 2>/dev/null | sort -u | while IFS= read -r f; do
-      [ -f "$f" ] || continue
-      # strip internal SITE_ID marker from final human summary
-      sed '/^#SITE_ID:/d' "$f" >> "$BITRIX_OUT_DIR/summary.txt"
-      echo >> "$BITRIX_OUT_DIR/summary.txt"
-    done
-  fi
-  # if nothing ended up in summary, add skipping note
-  if [ ! -s "$BITRIX_OUT_DIR/summary.txt" ]; then
-    echo "Bitrix: no /bitrix/.settings.php files found under /home/bitrix — skipping" > "$BITRIX_OUT_DIR/summary.txt"
-  fi
-fi
+hdr "Bitrix: exception_handling (moved to collect_bitrix.sh)"
+echo "Bitrix-specific analysis has been moved to collect_bitrix.sh"
+echo "Run './collect_bitrix.sh' for comprehensive Bitrix analysis including:"
+echo "  - .settings.php files analysis"
+echo "  - exception_handling configuration"
+echo "  - cache directories analysis"
+echo "  - multi-site configuration support"
+echo "  - cache cleanup recommendations"
 
 
 comm -23 "$EXT_DIAG_DIR/expected_from_ini.txt" "$EXT_DIAG_DIR/loaded_cli.txt" \
@@ -1250,14 +1045,199 @@ find "$PROBE_DIR" -type f -printf '%s	%p
 ' 2>/dev/null | sort -nr | head -n 5 | awk '{printf "    %9.1f KB  %s\n", $1/1024, $2}' >> "$HUMAN_SUMMARY" || true
 
 # Write human summary to audit dir
-# If we collected Bitrix per-site summaries, include them
-if [ -f "$BITRIX_OUT_DIR/summary.txt" ]; then
-  echo >> "$HUMAN_SUMMARY"
-  echo "Bitrix per-site exception_handling summary:" >> "$HUMAN_SUMMARY"
-  sed -n '1,200p' "$BITRIX_OUT_DIR/summary.txt" | sed 's/^/  /' >> "$HUMAN_SUMMARY" || true
-fi
-
 write_audit_summary "$SUMMARY_COPY" < "$HUMAN_SUMMARY"
+
+##### Security Audit #####
+if [ "${ENABLE_SECURITY_CHECKS:-1}" = "1" ]; then
+  hdr "Security Audit"
+  
+  # Create security report file
+  SECURITY_REPORT="${PROBE_DIR}/security_report.txt"
+  echo "# PHP Security Audit Report" > "$SECURITY_REPORT"
+  echo "Generated: $(date)" >> "$SECURITY_REPORT"
+  echo "" >> "$SECURITY_REPORT"
+  
+  # Check dangerous PHP settings
+  hdr "Dangerous PHP Settings Check"
+  
+  DANGEROUS_SETTINGS=(
+    "allow_url_fopen=On"
+    "allow_url_include=On"
+    "display_errors=On"
+    "log_errors=Off"
+    "expose_php=On"
+    "enable_dl=On"
+    "file_uploads=On"
+    "register_globals=On"
+    "magic_quotes_gpc=On"
+  )
+  
+  for setting in "${DANGEROUS_SETTINGS[@]}"; do
+    setting_name=$(echo "$setting" | cut -d= -f1)
+    setting_value=$(echo "$setting" | cut -d= -f2)
+    
+    if php -r "echo ini_get('$setting_name');" 2>/dev/null | grep -q "$setting_value"; then
+      echo "[SECURITY] ВНИМАНИЕ: $setting_name = $setting_value (небезопасно)" | tee -a "$SECURITY_REPORT"
+    else
+      echo "[SECURITY] OK: $setting_name настроен безопасно" | tee -a "$SECURITY_REPORT"
+    fi
+  done
+  
+  # Check memory and execution limits
+  hdr "Memory and Execution Limits Check"
+  
+  MEMORY_LIMIT=$(php -r "echo ini_get('memory_limit');" 2>/dev/null || echo "unknown")
+  MAX_EXECUTION_TIME=$(php -r "echo ini_get('max_execution_time');" 2>/dev/null || echo "unknown")
+  MAX_INPUT_TIME=$(php -r "echo ini_get('max_input_time');" 2>/dev/null || echo "unknown")
+  
+  echo "[SECURITY] memory_limit: $MEMORY_LIMIT" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] max_execution_time: $MAX_EXECUTION_TIME" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] max_input_time: $MAX_INPUT_TIME" | tee -a "$SECURITY_REPORT"
+  
+  # Check for reasonable limits
+  if [[ "$MEMORY_LIMIT" =~ ^[0-9]+$ ]] && [ "$MEMORY_LIMIT" -lt 128 ]; then
+    echo "[SECURITY] ВНИМАНИЕ: memory_limit слишком мал ($MEMORY_LIMIT MB)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  if [[ "$MAX_EXECUTION_TIME" =~ ^[0-9]+$ ]] && [ "$MAX_EXECUTION_TIME" -lt 30 ]; then
+    echo "[SECURITY] ВНИМАНИЕ: max_execution_time слишком мал ($MAX_EXECUTION_TIME s)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check file upload settings
+  hdr "File Upload Security Check"
+  
+  UPLOAD_MAX_FILESIZE=$(php -r "echo ini_get('upload_max_filesize');" 2>/dev/null || echo "unknown")
+  POST_MAX_SIZE=$(php -r "echo ini_get('post_max_size');" 2>/dev/null || echo "unknown")
+  MAX_FILE_UPLOADS=$(php -r "echo ini_get('max_file_uploads');" 2>/dev/null || echo "unknown")
+  
+  echo "[SECURITY] upload_max_filesize: $UPLOAD_MAX_FILESIZE" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] post_max_size: $POST_MAX_SIZE" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] max_file_uploads: $MAX_FILE_UPLOADS" | tee -a "$SECURITY_REPORT"
+  
+  # Check for excessive upload limits
+  if [[ "$UPLOAD_MAX_FILESIZE" =~ ^[0-9]+M$ ]] && [ "${UPLOAD_MAX_FILESIZE%M}" -gt 100 ]; then
+    echo "[SECURITY] ВНИМАНИЕ: upload_max_filesize слишком велик ($UPLOAD_MAX_FILESIZE)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check session security
+  hdr "Session Security Check"
+  
+  SESSION_COOKIE_SECURE=$(php -r "echo ini_get('session.cookie_secure');" 2>/dev/null || echo "unknown")
+  SESSION_COOKIE_HTTPONLY=$(php -r "echo ini_get('session.cookie_httponly');" 2>/dev/null || echo "unknown")
+  SESSION_USE_STRICT_MODE=$(php -r "echo ini_get('session.use_strict_mode');" 2>/dev/null || echo "unknown")
+  
+  echo "[SECURITY] session.cookie_secure: $SESSION_COOKIE_SECURE" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] session.cookie_httponly: $SESSION_COOKIE_HTTPONLY" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] session.use_strict_mode: $SESSION_USE_STRICT_MODE" | tee -a "$SECURITY_REPORT"
+  
+  if [ "$SESSION_COOKIE_SECURE" != "1" ]; then
+    echo "[SECURITY] ВНИМАНИЕ: session.cookie_secure отключен (небезопасно для HTTPS)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  if [ "$SESSION_COOKIE_HTTPONLY" != "1" ]; then
+    echo "[SECURITY] ВНИМАНИЕ: session.cookie_httponly отключен (уязвимость XSS)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  if [ "$SESSION_USE_STRICT_MODE" != "1" ]; then
+    echo "[SECURITY] ВНИМАНИЕ: session.use_strict_mode отключен (уязвимость session fixation)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check for dangerous functions
+  hdr "Dangerous Functions Check"
+  
+  DISABLED_FUNCTIONS=$(php -r "echo ini_get('disable_functions');" 2>/dev/null || echo "")
+  
+  if [ -n "$DISABLED_FUNCTIONS" ]; then
+    echo "[SECURITY] OK: Отключенные функции: $DISABLED_FUNCTIONS" | tee -a "$SECURITY_REPORT"
+  else
+    echo "[SECURITY] ВНИМАНИЕ: disable_functions не настроен" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check for dangerous extensions
+  hdr "Dangerous Extensions Check"
+  
+  DANGEROUS_EXTENSIONS=("exec" "shell_exec" "system" "passthru" "proc_open" "popen")
+  
+  for ext in "${DANGEROUS_EXTENSIONS[@]}"; do
+    if php -m | grep -q "^$ext$"; then
+      echo "[SECURITY] ВНИМАНИЕ: Загружено расширение $ext (потенциально опасно)" | tee -a "$SECURITY_REPORT"
+    fi
+  done
+  
+  # Check PHP version for known vulnerabilities
+  hdr "PHP Version Security Check"
+  
+  PHP_VERSION=$(php -r "echo PHP_VERSION;" 2>/dev/null || echo "unknown")
+  echo "[SECURITY] PHP Version: $PHP_VERSION" | tee -a "$SECURITY_REPORT"
+  
+  # Check for very old PHP versions
+  if [[ "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+ ]]; then
+    MAJOR_MINOR=$(echo "$PHP_VERSION" | cut -d. -f1-2)
+    if (( $(echo "$MAJOR_MINOR < 7.4" | bc -l) )); then
+      echo "[SECURITY] КРИТИЧНО: PHP $PHP_VERSION не поддерживается (уязвимости безопасности)" | tee -a "$SECURITY_REPORT"
+    elif (( $(echo "$MAJOR_MINOR < 8.0" | bc -l) )); then
+      echo "[SECURITY] ВНИМАНИЕ: PHP $PHP_VERSION устарел (рекомендуется обновление)" | tee -a "$SECURITY_REPORT"
+    fi
+  fi
+  
+  # Check OPcache security
+  hdr "OPcache Security Check"
+  
+  OPCACHE_ENABLED=$(php -r "echo ini_get('opcache.enable');" 2>/dev/null || echo "unknown")
+  OPCACHE_VALIDATE_TIMESTAMPS=$(php -r "echo ini_get('opcache.validate_timestamps');" 2>/dev/null || echo "unknown")
+  
+  echo "[SECURITY] opcache.enable: $OPCACHE_ENABLED" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] opcache.validate_timestamps: $OPCACHE_VALIDATE_TIMESTAMPS" | tee -a "$SECURITY_REPORT"
+  
+  if [ "$OPCACHE_ENABLED" != "1" ]; then
+    echo "[SECURITY] ВНИМАНИЕ: OPcache отключен (снижение производительности)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check file permissions
+  hdr "File Permissions Check"
+  
+  # Check PHP configuration files
+  for conf_file in /etc/php/*/fpm/php.ini /etc/php/*/cli/php.ini; do
+    if [ -f "$conf_file" ]; then
+      PERMS=$(stat -c "%a" "$conf_file" 2>/dev/null || echo "unknown")
+      if [ "$PERMS" != "644" ] && [ "$PERMS" != "640" ]; then
+        echo "[SECURITY] ВНИМАНИЕ: Небезопасные права на $conf_file: $PERMS" | tee -a "$SECURITY_REPORT"
+      else
+        echo "[SECURITY] OK: Безопасные права на $conf_file: $PERMS" | tee -a "$SECURITY_REPORT"
+      fi
+    fi
+  done
+  
+  # Generate security summary
+  echo "" | tee -a "$SECURITY_REPORT"
+  echo "===== Security Summary =====" | tee -a "$SECURITY_REPORT"
+  
+  CRITICAL_COUNT=$(grep -c "КРИТИЧНО:" "$SECURITY_REPORT" 2>/dev/null || echo "0")
+  WARNING_COUNT=$(grep -c "ВНИМАНИЕ:" "$SECURITY_REPORT" 2>/dev/null || echo "0")
+  OK_COUNT=$(grep -c "OK:" "$SECURITY_REPORT" 2>/dev/null || echo "0")
+  
+  echo "[SECURITY] Критичных проблем: $CRITICAL_COUNT" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] Предупреждений: $WARNING_COUNT" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] OK проверок: $OK_COUNT" | tee -a "$SECURITY_REPORT"
+  
+  if [ "$CRITICAL_COUNT" -gt 0 ]; then
+    echo "[SECURITY] РЕКОМЕНДАЦИЯ: Немедленно устраните критические проблемы безопасности" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  if [ "$WARNING_COUNT" -gt 0 ]; then
+    echo "[SECURITY] РЕКОМЕНДАЦИЯ: Рассмотрите устранение предупреждений безопасности" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Add security report to main report
+  echo "" | tee -a "$REPORT"
+  echo "===== Security Audit Results =====" | tee -a "$REPORT"
+  cat "$SECURITY_REPORT" | tee -a "$REPORT"
+  
+  hdr "Security audit завершен"
+else
+  hdr "Security Audit"
+  echo "Security проверки отключены (ENABLE_SECURITY_CHECKS=0)" | tee -a "$REPORT"
+fi
 
 ##### Final stats (упаковку делает trap EXIT) #####
 ARCHIVE="${ARCHIVE:-${AUDIT_DIR}/php.tgz}"

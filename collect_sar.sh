@@ -1,12 +1,39 @@
 #!/usr/bin/env bash
 # Re-exec in a sterile env to avoid interactive profile/menu scripts being sourced by child shells.
 if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
-  exec env -i PS4="$PS4" HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color BASH_ENV= _STERILE=1 \
+  # Determine best available locale for sterile environment
+  _detect_locale() {
+    if locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+      echo "en_US.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+      echo "en_US.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.UTF-8$'; then
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.utf8$'; then
+      echo "ru_RU.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+      echo "C.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.utf8$'; then
+      echo "C.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^POSIX$'; then
+      echo "POSIX"
+    else
+      echo "C"
+    fi
+  }
+  
+  _LOCALE="$(_detect_locale)"
+  exec env -i PS4="$PS4" HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color \
+    LANG="$_LOCALE" LANGUAGE="$_LOCALE" \
+    BASH_ENV= _STERILE=1 \
     bash --noprofile --norc "$0" "$@"
 fi
 # sar-analyzer.sh — консольный отчёт по sysstat (sar/sadf), header-aware
 # Требования: bash>=4, sar/sadf, gawk, sort, head, tail, grep, env, date
 set -Eeuo pipefail
+
+# Version information
+VERSION="2.1.0"
 
 ### === ENV defaults ===
 START="${START:-08:00:00}"
@@ -46,64 +73,27 @@ trap 'if [ "${CLEAN_TMP:-1}" -ne 0 ]; then rm -rf "$tmpdir"; fi' EXIT
 log(){ echo "[$(date +%F\ %T)] $*" >&2; }
 dbg(){ [ "$DEBUG" = "1" ] && log "DBG: $*"; }
 
-require_cmd(){ local miss=0; for c in "$@"; do command -v "$c" >/dev/null 2>&1 || { echo "Нужна утилита: $c"; miss=1; }; done; [ $miss -eq 0 ] || exit 1; }
-
-# Локали: время — по запросу, числа — в C (точка), чтобы printf не спотыкался
-# Prefer ru_RU.UTF-8, fall back to en_US.UTF-8, then en_US:en, then C if needed.
-# LANGUAGE and LC_TIME policy (do not modify system-wide settings)
-# - Ensure commands inside the script run with LANGUAGE=en_US.UTF-8 (fallback en_US:en)
-# - Ensure LC_TIME=ru_RU.UTF-8 when available; if ru isn't available, try to ensure
-#   LANGUAGE is en_US.UTF-8 (fallback en_US:en) and use an en_US LC_TIME if needed.
-
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
-
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-# Determine per-command LANGUAGE and LC_TIME without exporting system-wide
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi; done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
-fi
-
-SCRIPT_LC_TIME=""
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
-  else SCRIPT_LC_TIME=C
-  fi
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-    SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
-fi
-
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
-
-require_cmd sar sadf awk sort head tail grep date
-
-OUT_DIR="${OUT_DIR:-${HOME}/sar_audit}"
-mkdir -p "$OUT_DIR"
-
 # Central audit dir for archives and helpers
 source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
+
+# Setup locale using common functions
+setup_locale
+
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "================================================" >&2
+    echo "ВНИМАНИЕ: Скрипт запущен БЕЗ root-прав" >&2
+    echo "Некоторые данные будут недоступны:" >&2
+    echo "  - Логи в /var/log/" >&2
+    echo "  - Конфигурации в /etc/" >&2
+    echo "  - Системные команды (smartctl, dmidecode)" >&2
+    echo "Для полного аудита запустите: sudo $0 $*" >&2
+    echo "================================================" >&2
+    echo ""
+fi
+
+# Check requirements using common function
+check_requirements "SAR" sar with_locale sadf awk sort head tail grep date
 
 ### === IF speeds map ===
 # Normalize IF_SPEED_Mbps into a canonical comma-separated list of iface=speed entries.
@@ -142,14 +132,14 @@ fi
 # else parses IF_SPEED_Mbps string and environment overrides.
 get_if_speed(){
   local iface="$1" val=""
-  # env var override IF_SPEED_Mbps_<iface>
-  local varname="IF_SPEED_Mbps_$iface"
+  # env var override IF_SPEED_Mbps_<iface> (replace dashes with underscores for valid var names)
+  local varname="IF_SPEED_Mbps_${iface//-/_}"
   val="${!varname:-}"
   if [ -z "$val" ] && [ -n "${IF_SPEED_Mbps_NORM:-}" ]; then
-    val=$(printf '%s' "$IF_SPEED_Mbps_NORM" | tr ',' '\n' | sed -n "s/^ *${iface} *= *\([0-9]\+\) *$/\1/p" | head -n1)
+    val=$(printf '%s' "$IF_SPEED_Mbps_NORM" | tr ',' '\n' | sed -n "s/^ *${iface} *= *\([0-9]\+\) *$/\1/p" | head -n1 || true)
   fi
   if [ -z "$val" ] && [ -n "${IF_SPEED_Mbps:-}" ]; then
-    val=$(printf '%s' "$IF_SPEED_Mbps" | tr ',' '\n' | sed -n "s/^ *${iface} *= *\([0-9]\+\) *$/\1/p" | head -n1)
+    val=$(printf '%s' "$IF_SPEED_Mbps" | tr ',' '\n' | sed -n "s/^ *${iface} *= *\([0-9]\+\) *$/\1/p" | head -n1 || true)
   fi
   printf '%s' "${val:-0}"
 }
@@ -157,7 +147,7 @@ get_if_speed(){
 ### === Find saNN files by mtime ===
 find_sa_files(){
   find /var/log/sa /var/log/sysstat -maxdepth 1 -type f -name 'sa[0-9]*' -printf '%T@ %p\n' 2>/dev/null \
-  | sort -nr | awk '{print $2}' | head -n "$MAX_FILES"
+  | sort -nr | awk '{print $2}' | head -n "$MAX_FILES" || true
 }
 
 ### === Header ===
@@ -190,7 +180,7 @@ append_top(){ # file score ts desc
 ### === has_data ===
 has_data(){ # safile, sar-keys
   local f="$1"; shift
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- "$@" 2>/dev/null | awk 'NR==2{ok=1} END{exit !ok}'
+  with_locale with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- "$@" 2>/dev/null | awk 'NR==2{ok=1} END{exit !ok}'
 }
 
 ### === Sections ===
@@ -204,7 +194,7 @@ print_cpu_section(){
   : >"$busy_vals"; : >"$iow_vals"
 
   # pctl + TOP
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -u \
+  with_locale with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -u \
   | awk -F';' -v busy_vals="$busy_vals" -v iow_vals="$iow_vals" \
         -v BUSYW="$CPU_BUSY_PCT" -v IOWW="$CPU_IOWAIT_WARN" -v STW="$CPU_STEAL_WARN" '
       NR==1{ for(i=1;i<=NF;i++) m[$i]=i; next }
@@ -229,7 +219,7 @@ print_cpu_section(){
   # runq/load из -q
   local runq_avg l1 l5 l15
   read -r runq_avg l1 l5 l15 < <(
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -q \
+  with_locale with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -q \
     | awk -F';' '
         NR==1{ for(i=1;i<=NF;i++) m[$i]=i; next }
         { rq+=$(m["runq-sz"])+0; l_1+=$(m["ldavg-1"])+0; l_5+=$(m["ldavg-5"])+0; l_15+=$(m["ldavg-15"])+0; n++ }
@@ -239,15 +229,15 @@ print_cpu_section(){
   # cswch/s из -w
   local cswch_avg
   cswch_avg=$(
-    sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -w \
+    with_locale with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -w \
     | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}{cs+=$(m["cswch/s"])+0; n++} END{printf n? cs/n:0}'
   )
 
   # avg steal/idle из -u
   local steal_avg idle_avg
-  steal_avg=$(sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -u \
+  steal_avg=$(with_locale with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -u \
     | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next} ($(m["CPU"])=="-1"||$(m["CPU"])=="all"){st+=$(m["%steal"]); n++} END{printf n? st/n:0}')
-  idle_avg=$(sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -u \
+  idle_avg=$(with_locale with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -u \
     | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next} ($(m["CPU"])=="-1"||$(m["CPU"])=="all"){id+=$(m["%idle"]); n++}  END{printf n? id/n:0}')
 
   printf "  avg busy(usr+sys)=%.1f%%  iowait=%.1f%%  steal=%.1f%%  idle=%.1f%%\n" \
@@ -282,7 +272,7 @@ print_mem_section(){
   local memvals="$tmpdir/memused.$RANDOM" kbavals="$tmpdir/kbavail.$RANDOM"
   : >"$memvals"; : >"$kbavals"
 
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -r \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -r \
   | awk -F';' -v M="$memvals" -v K="$kbavals" '
       NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
       { mu=$(m["%memused"])+0; ka=$(m["kbavail"])+0; print mu>>M; print ka>>K; MU+=mu; KA+=ka; n++ }
@@ -296,20 +286,20 @@ print_mem_section(){
 
   if has_data "$f" -S; then
     local swpavg
-    swpavg=$(sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -S \
+    swpavg=$(with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -S \
       | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}{s+=$(m["%swpused"]); n++} END{printf n? s/n:0}')
     printf "  avg %%swpused=%.1f%%\n" "${swpavg:-0}"
   fi
 
   if has_data "$f" -B; then
     local press
-    press=$(sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -B \
+    press=$(with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -B \
       | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}{if($(m["pgscan/s"])+0>0 && $(m["pgsteal/s"])+0>0) p=1} END{print p+0}')
     [ "${press:-0}" -eq 1 ] && echo "  [!] Давление на кэш страниц: pgscan>0 и pgsteal>0 в окне"
   fi
 
   # ТОП по моментам памяти (фильтруем «пустые» записи)
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -r \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -r \
   | awk -F';' '
       NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
       { ts=(("timestamp" in m)? $(m["timestamp"]) : $1);
@@ -328,14 +318,14 @@ print_disk_section(){
   if ! has_data "$f" -d; then echo "  (нет данных sar -d в окне)"; return; fi
 
   local avg_table="$tmpdir/disk_avg.$RANDOM"
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -d \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -d \
   | awk -F';' '
       NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
       { dev=$(m["DEV"]); await=$(m["await"])+0; util=$(m["%util"])+0; aqu=$(m["aqu-sz"])+0; c[dev]++; A[dev]+=await; U[dev]+=util; Q[dev]+=aqu }
       END{ for (d in A) printf "%-20s avg await=%.1fms  %%util=%.1f  aqu=%.2f\n", d, A[d]/c[d], U[d]/c[d], Q[d]/c[d] }' >"$avg_table"
 
   echo "  Средние задержки/занятость (топ 5 по await):"
-  awk '{ if (match($0,/avg await=([0-9.]+)ms/,m)) print m[1], $0 }' "$avg_table" | sort -nr | head -n 5 | cut -d' ' -f2-
+  awk '{ if (match($0,/avg await=([0-9.]+)ms/,m)) print m[1], $0 }' "$avg_table" | sort -nr | head -n 5 | cut -d' ' -f2- || true
 
   awk -v aw="$DISK_AWAIT_WARN" -v uw="$DISK_UTIL_WARN" '
     match($0,/avg await=([0-9.]+)ms/,m1) && match($0,/%util=([0-9.]+)/,m2){
@@ -343,7 +333,7 @@ print_disk_section(){
       if(m2[1]+0>uw) printf "  [!] %s (>%.0f%%)\n", $0, uw;
     }' "$avg_table"
 
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -d \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -d \
   | awk -F';' -v awsp="$DISK_AWAIT_SPIKE" -v us="$DISK_UTIL_SPIKE" -v aq="$DISK_AQU_SPIKE" '
       NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
       { ts=$(m["timestamp"]); dev=$(m["DEV"]); await=$(m["await"])+0; util=$(m["%util"])+0; aqu=$(m["aqu-sz"])+0; sc=0;
@@ -360,7 +350,7 @@ print_net_section(){
   if ! has_data "$f" -n DEV; then echo "  (нет данных sar -n DEV в окне)"; return; fi
 
   local iflist="$tmpdir/ifaces.$RANDOM"; : >"$iflist"
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n DEV \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n DEV \
   | awk -F';' -v inc_lo="$INCLUDE_LO" '
       NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
       {
@@ -376,7 +366,7 @@ print_net_section(){
     local rxfile="$tmpdir/${iface}.rx" txfile="$tmpdir/${iface}.tx" utilfile="$tmpdir/${iface}.util"
     : >"$rxfile"; : >"$txfile"; : >"$utilfile"
 
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n DEV \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n DEV \
     | awk -F';' -v ifc="$iface" -v RX="$rxfile" -v TX="$txfile" -v UT="$utilfile" '
         NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
         $(m["IFACE"])==ifc { print $(m["rxkB/s"])>>RX; print $(m["txkB/s"])>>TX; print $(m["%ifutil"])>>UT }'
@@ -405,7 +395,7 @@ print_net_section(){
     printf "     p95/p99 load(rx+tx)=%.1f/%.1f kB/s\n" "${p95:-0}" "${p99:-0}"
 
     # ТОП по нагрузке (баллы только если скорость известна и %ifutil>=порога)
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n DEV \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n DEV \
     | awk -F';' -v ifc="$iface" -v sp="${speed:-0}" -v warn="$IFUTIL_WARN" '
         NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
         $(m["IFACE"])!=ifc{next}
@@ -418,7 +408,7 @@ print_net_section(){
   done < "$iflist"
 
   if has_data "$f" -n EDEV; then
-    sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n EDEV \
+    with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n EDEV \
     | awk -F';' -v min="$NET_ERR_MIN" -v inc_lo="$INCLUDE_LO" '
         NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
         { iface=$(m["IFACE"]); if(inc_lo==0 && iface=="lo") next
@@ -435,7 +425,7 @@ print_net_section(){
 print_sock_tcp_ip_section_collect_tops(){
   local f="$1"
   if has_data "$f" -n SOCK; then
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n SOCK \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n SOCK \
     | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
         { ts=$(m["timestamp"]); tots=$(m["totsck"])+0; tcps=$(m["tcpsck"])+0; udps=$(m["udpsck"])+0; tw=$(m["tcp-tw"])+0;
           score=(tw>0?1:0)
@@ -443,7 +433,7 @@ print_sock_tcp_ip_section_collect_tops(){
     | sort -t';' -k1,1nr -k2,2 >>"$TOP_SOCK"
   fi
   if has_data "$f" -n TCP; then
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n TCP \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n TCP \
     | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
         { ts=$(m["timestamp"]); act=$(m["active/s"])+0; pas=$(m["passive/s"])+0; ret=$(m["retrans/s"])+0; est=$(m["estab"])+0; inerr=$(m["inerr"])+0;
           score=(ret>0?4:0)+(inerr>0?4:0)+((act>0||pas>0)?1:0)
@@ -451,7 +441,7 @@ print_sock_tcp_ip_section_collect_tops(){
     | sort -t';' -k1,1nr -k2,2 >>"$TOP_TCP"
   fi
   if has_data "$f" -n IP; then
-  sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n IP \
+  with_locale sadf "${SADF_OPTS[@]}" -s "$START" -e "$END" "$f" -- -n IP \
     | awk -F';' 'NR==1{for(i=1;i<=NF;i++) m[$i]=i; next}
         { ts=$(m["timestamp"]); irec=$(m["irec/s"])+0; idel=$(m["idel/s"])+0; irej=$(m["irej/s"])+0;
           score=(irej>0?3:0)+((irec>1000 && idel>0)?1:0)
@@ -465,7 +455,7 @@ print_top_block(){ # title file
   local title="$1" file="$2"
   echo "$title (ТОП-$TOPN)"
   if [ ! -s "$file" ]; then echo "  (пусто)"; echo; return; fi
-  sort -t';' -k1,1nr -k2,2 "$file" | head -n "$TOPN" | awk -F';' '{printf "  %s  %s\n", $2, $3}'
+  sort -t';' -k1,1nr -k2,2 "$file" | head -n "$TOPN" | awk -F';' '{printf "  %s  %s\n", $2, $3}' || true
   echo
 }
 
@@ -496,7 +486,7 @@ print_top_block "IP"                  "$TOP_IP"
 
 echo "Сводный ТОП-$TOPN по всем подсистемам"
 if [ -s "$TOP_ALL" ]; then
-  sort -t';' -k1,1nr -k2,2 "$TOP_ALL" | head -n "$TOPN" | awk -F';' '{printf "  %s  %s\n", $2, $3}'
+  sort -t';' -k1,1nr -k2,2 "$TOP_ALL" | head -n "$TOPN" | awk -F';' '{printf "  %s  %s\n", $2, $3}' || true
 else
   echo "  (пусто)"
 fi

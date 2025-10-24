@@ -8,59 +8,40 @@
 # deterministically in automation systems (cron, systemd, CI).
 set -euo pipefail
 if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
+  # Determine best available locale for sterile environment
+  _detect_locale() {
+    if locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+      echo "en_US.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+      echo "en_US.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.UTF-8$'; then
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.utf8$'; then
+      echo "ru_RU.utf8"
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+      echo "C.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.utf8$'; then
+      echo "C.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^POSIX$'; then
+      echo "POSIX"
+    else
+      echo "C"
+    fi
+  }
+  
   # Ensure PS4 has a timestamp so 'bash -x' traces after re-exec include wall-clock time
   export PS4='+[$(date +%FT%T.%3N)] ${BASH_SOURCE[0]}:$LINENO: '
+  _LOCALE="$(_detect_locale)"
   # Preserve PS4 in the cleared environment so traced re-exec includes timestamps
-  exec env -i PS4="$PS4" HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color BASH_ENV= _STERILE=1 \
+  exec env -i PS4="$PS4" HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color \
+    LANG="$_LOCALE" LANGUAGE="$_LOCALE" \
+    BASH_ENV= _STERILE=1 \
     bash --noprofile --norc "$0" "$@"
 fi
 
-# LANGUAGE and LC_TIME policy (do not modify system-wide settings)
-# - Ensure commands inside the script run with LANGUAGE=en_US.UTF-8 (fallback en_US:en)
-# - Ensure LC_TIME=ru_RU.UTF-8 when available; if ru isn't available, try to ensure
-#   LANGUAGE is en_US.UTF-8 (fallback en_US:en) and use an en_US LC_TIME if needed.
-
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
-
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-# Determine per-command LANGUAGE and LC_TIME without exporting system-wide
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi; done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
-fi
-
-SCRIPT_LC_TIME=""
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
-  else SCRIPT_LC_TIME=C
-  fi
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-    SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
-fi
-
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
+# Version information
+VERSION="2.1.0"
 
 # Default OUT_DIR (raw per-service data) under $HOME
 OUT_DIR="${OUT_DIR:-${HOME}/nginx_audit}"
@@ -68,6 +49,9 @@ mkdir -p "$OUT_DIR"
 
 # Central audit dir (use shared helper)
 source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
+
+# Setup locale using common functions
+setup_locale
 
 # Quick options: --days N (default 7)
 DAYS=7

@@ -2,7 +2,32 @@
 # collect_cron.sh — найти и вывести все cron-файлы + собрать в архив
 # Re-exec in a sterile env to avoid interactive profile/menu scripts being sourced by child shells.
 if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
-  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color BASH_ENV= _STERILE=1 \
+  # Determine best available locale for sterile environment
+  _detect_locale() {
+    if locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+      echo "en_US.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+      echo "en_US.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.UTF-8$'; then
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.utf8$'; then
+      echo "ru_RU.utf8"
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+      echo "C.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.utf8$'; then
+      echo "C.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^POSIX$'; then
+      echo "POSIX"
+    else
+      echo "C"
+    fi
+  }
+  
+  _LOCALE="$(_detect_locale)"
+  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color \
+    LANG="$_LOCALE" LANGUAGE="$_LOCALE" \
+    BASH_ENV= _STERILE=1 \
     bash --noprofile --norc "$0" "$@"
 fi
 # Использование:
@@ -13,58 +38,26 @@ fi
 
 set -euo pipefail
 
+# Use shared audit_common.sh for locale management
+source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 
-# Ensure per-process LC_TIME for consistent time formatting (do not modify system-wide settings)
-# Prefer ru_RU.UTF-8, fall back to en_US.UTF-8, then en_US:en, then C if needed.
-# LANGUAGE and LC_TIME policy (do not modify system-wide settings)
-# - Ensure commands inside the script run with LANGUAGE=en_US.UTF-8 (fallback en_US:en)
-# - Ensure LC_TIME=ru_RU.UTF-8 when available; if ru isn't available, try to ensure
-#   LANGUAGE is en_US.UTF-8 (fallback en_US:en) and use an en_US LC_TIME if needed.
+# Setup locale using common functions
+setup_locale
 
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
-
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-# Determine per-command LANGUAGE and LC_TIME without exporting system-wide
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do
-  if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi
-done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
-fi
-
-SCRIPT_LC_TIME=""
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
-  else SCRIPT_LC_TIME=C
-  fi
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-    SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "================================================" >&2
+    echo "ВНИМАНИЕ: Скрипт запущен БЕЗ root-прав" >&2
+    echo "Некоторые данные будут недоступны:" >&2
+    echo "  - Логи в /var/log/" >&2
+    echo "  - Конфигурации в /etc/" >&2
+    echo "  - Системные команды (smartctl, dmidecode)" >&2
+    echo "Для полного аудита запустите: sudo $0 $*" >&2
+    echo "================================================" >&2
+    echo ""
 fi
 
 # with_locale runs a single command with the chosen LANGUAGE and LC_TIME
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
 
 NO_ARCHIVE=0
 NO_COMMENTS=0

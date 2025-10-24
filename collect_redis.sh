@@ -5,7 +5,32 @@
 set -uo pipefail
 # Re-exec in a sterile env to avoid interactive profile/menu scripts being sourced by child shells.
 if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
-  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color BASH_ENV= _STERILE=1 \
+  # Determine best available locale for sterile environment
+  _detect_locale() {
+    if locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+      echo "en_US.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+      echo "en_US.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.UTF-8$'; then
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.utf8$'; then
+      echo "ru_RU.utf8"
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+      echo "C.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.utf8$'; then
+      echo "C.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^POSIX$'; then
+      echo "POSIX"
+    else
+      echo "C"
+    fi
+  }
+  
+  _LOCALE="$(_detect_locale)"
+  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color \
+    LANG="$_LOCALE" LANGUAGE="$_LOCALE" \
+    BASH_ENV= _STERILE=1 \
     bash --noprofile --norc "$0" "$@"
 fi
 
@@ -13,57 +38,26 @@ fi
 export BX_NOMENU=1 BITRIX_NO_MENU=1 DISABLE_BITRIX_MENU=1
 
 # ===== Настройки (переопределяемые переменные окружения) =====
-LOCALE="${LOCALE:-ru_RU.UTF-8}"
+# Use shared audit_common.sh for locale management
+source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 
-# Ensure per-process LC_TIME for consistent time formatting (do not modify system-wide settings)
-# Prefer ru_RU.UTF-8, fall back to en_US.UTF-8, then en_US:en, then C if needed.
-# LANGUAGE and LC_TIME policy (do not modify system-wide settings)
-# - Ensure commands inside the script run with LANGUAGE=en_US.UTF-8 (fallback en_US:en)
-# - Ensure LC_TIME=ru_RU.UTF-8 when available; if ru isn't available, try to ensure
-#   LANGUAGE is en_US.UTF-8 (fallback en_US:en) and use an en_US LC_TIME if needed.
+# Setup locale using common functions
+setup_locale
 
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
-
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-# Determine per-command LANGUAGE and LC_TIME without exporting system-wide
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi; done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
-fi
-
-SCRIPT_LC_TIME=""
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
-  else SCRIPT_LC_TIME=C
-  fi
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-    SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "================================================" >&2
+    echo "ВНИМАНИЕ: Скрипт запущен БЕЗ root-прав" >&2
+    echo "Некоторые данные будут недоступны:" >&2
+    echo "  - Логи в /var/log/" >&2
+    echo "  - Конфигурации в /etc/" >&2
+    echo "  - Системные команды (smartctl, dmidecode)" >&2
+    echo "Для полного аудита запустите: sudo $0 $*" >&2
+    echo "================================================" >&2
+    echo ""
 fi
 
 # with_locale runs a single command with the chosen LANGUAGE and LC_TIME
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
 
 BASE_DIR="${BASE_DIR:-${HOME}}"
 PROBE_ROOT="${PROBE_ROOT:-${BASE_DIR:-${HOME}}/redis_audit}"
@@ -519,6 +513,194 @@ RECO="${WORKDIR}/out/recommendations.txt"
   echo "- Используйте --bigkeys/--memkeys для находки «тяжёлых» ключей, добавляйте TTL где возможно."
 } > "${RECO}"
 
+# ===== Security Audit =====
+if [ "${ENABLE_SECURITY_CHECKS:-1}" = "1" ]; then
+  hdr "Security Audit"
+  
+  # Create security report file
+  SECURITY_REPORT="${WORKDIR}/out/security_report.txt"
+  echo "# Redis Security Audit Report" > "$SECURITY_REPORT"
+  echo "Generated: $(date)" >> "$SECURITY_REPORT"
+  echo "" >> "$SECURITY_REPORT"
+  
+  # Check authentication
+  hdr "Authentication Security Check"
+  
+  AUTH_REQUIRED=$(timeout "$TIMEOUT" $REDIS_CLI CONFIG GET requirepass 2>/dev/null | grep -v "requirepass" | tail -1 || echo "")
+  if [ -n "$AUTH_REQUIRED" ] && [ "$AUTH_REQUIRED" != '""' ]; then
+    echo "[SECURITY] OK: requirepass настроен (пароль установлен)" | tee -a "$SECURITY_REPORT"
+  else
+    echo "[SECURITY] КРИТИЧНО: requirepass не настроен (Redis доступен без пароля)" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check protected mode
+  PROTECTED_MODE=$(timeout "$TIMEOUT" $REDIS_CLI CONFIG GET protected-mode 2>/dev/null | grep -v "protected-mode" | tail -1 || echo "")
+  if [ "$PROTECTED_MODE" = "yes" ]; then
+    echo "[SECURITY] OK: protected-mode включен" | tee -a "$SECURITY_REPORT"
+  else
+    echo "[SECURITY] ВНИМАНИЕ: protected-mode отключен" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check bind address
+  hdr "Network Security Check"
+  
+  BIND_ADDRESS=$(timeout "$TIMEOUT" $REDIS_CLI CONFIG GET bind 2>/dev/null | grep -v "bind" | tail -1 || echo "")
+  if [ -n "$BIND_ADDRESS" ]; then
+    echo "[SECURITY] bind: $BIND_ADDRESS" | tee -a "$SECURITY_REPORT"
+    
+    # Check if binding to all interfaces
+    if echo "$BIND_ADDRESS" | grep -q "0.0.0.0\|*"; then
+      echo "[SECURITY] ВНИМАНИЕ: Redis привязан ко всем интерфейсам (0.0.0.0)" | tee -a "$SECURITY_REPORT"
+    else
+      echo "[SECURITY] OK: Redis привязан к конкретным интерфейсам" | tee -a "$SECURITY_REPORT"
+    fi
+  fi
+  
+  # Check port
+  PORT=$(timeout "$TIMEOUT" $REDIS_CLI CONFIG GET port 2>/dev/null | grep -v "port" | tail -1 || echo "")
+  if [ -n "$PORT" ]; then
+    echo "[SECURITY] port: $PORT" | tee -a "$SECURITY_REPORT"
+    
+    if [ "$PORT" = "6379" ]; then
+      echo "[SECURITY] INFO: Используется стандартный порт 6379" | tee -a "$SECURITY_REPORT"
+    else
+      echo "[SECURITY] OK: Используется нестандартный порт $PORT" | tee -a "$SECURITY_REPORT"
+    fi
+  fi
+  
+  # Check dangerous commands
+  hdr "Dangerous Commands Check"
+  
+  DANGEROUS_COMMANDS=("FLUSHALL" "FLUSHDB" "CONFIG" "DEBUG" "EVAL" "EVALSHA")
+  
+  for cmd in "${DANGEROUS_COMMANDS[@]}"; do
+    CMD_STATUS=$(timeout "$TIMEOUT" $REDIS_CLI CONFIG GET "rename-command" 2>/dev/null | grep -i "$cmd" || echo "")
+    if [ -n "$CMD_STATUS" ]; then
+      echo "[SECURITY] OK: Команда $cmd переименована или отключена" | tee -a "$SECURITY_REPORT"
+    else
+      echo "[SECURITY] ВНИМАНИЕ: Команда $cmd доступна (потенциально опасно)" | tee -a "$SECURITY_REPORT"
+    fi
+  done
+  
+  # Check for dangerous Lua scripts
+  hdr "Lua Scripts Security Check"
+  
+  SCRIPT_COUNT=$(timeout "$TIMEOUT" $REDIS_CLI SCRIPT LIST 2>/dev/null | wc -l || echo "0")
+  if [ "$SCRIPT_COUNT" -gt 0 ]; then
+    echo "[SECURITY] INFO: Найдено Lua скриптов: $SCRIPT_COUNT" | tee -a "$SECURITY_REPORT"
+    echo "[SECURITY] РЕКОМЕНДАЦИЯ: Проверьте Lua скрипты на безопасность" | tee -a "$SECURITY_REPORT"
+  else
+    echo "[SECURITY] OK: Lua скрипты не найдены" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Check for sensitive data exposure
+  hdr "Sensitive Data Check"
+  
+  # Check for keys that might contain sensitive data
+  SENSITIVE_PATTERNS=("password" "secret" "key" "token" "auth" "login" "user")
+  
+  for pattern in "${SENSITIVE_PATTERNS[@]}"; do
+    SENSITIVE_KEYS=$(timeout "$TIMEOUT" $REDIS_CLI KEYS "*${pattern}*" 2>/dev/null | wc -l || echo "0")
+    if [ "$SENSITIVE_KEYS" -gt 0 ]; then
+      echo "[SECURITY] ВНИМАНИЕ: Найдено ключей с паттерном '$pattern': $SENSITIVE_KEYS" | tee -a "$SECURITY_REPORT"
+    fi
+  done
+  
+  # Check Redis version for known vulnerabilities
+  hdr "Redis Version Security Check"
+  
+  REDIS_VERSION=$(timeout "$TIMEOUT" $REDIS_CLI INFO server 2>/dev/null | grep "redis_version:" | cut -d: -f2 | tr -d '\r' || echo "unknown")
+  echo "[SECURITY] Redis Version: $REDIS_VERSION" | tee -a "$SECURITY_REPORT"
+  
+  # Check for very old Redis versions
+  if [[ "$REDIS_VERSION" =~ ^[0-9]+\.[0-9]+ ]]; then
+    MAJOR_MINOR=$(echo "$REDIS_VERSION" | cut -d. -f1-2)
+    if (( $(echo "$MAJOR_MINOR < 5.0" | bc -l) )); then
+      echo "[SECURITY] КРИТИЧНО: Redis $REDIS_VERSION устарел (известные уязвимости)" | tee -a "$SECURITY_REPORT"
+    elif (( $(echo "$MAJOR_MINOR < 6.0" | bc -l) )); then
+      echo "[SECURITY] ВНИМАНИЕ: Redis $REDIS_VERSION устарел (рекомендуется обновление)" | tee -a "$SECURITY_REPORT"
+    fi
+  fi
+  
+  # Check file permissions
+  hdr "File Permissions Check"
+  
+  # Check Redis configuration file permissions
+  REDIS_CONF_FILES=("/etc/redis/redis.conf" "/etc/redis.conf" "/usr/local/etc/redis.conf")
+  
+  for conf_file in "${REDIS_CONF_FILES[@]}"; do
+    if [ -f "$conf_file" ]; then
+      PERMS=$(stat -c "%a" "$conf_file" 2>/dev/null || echo "unknown")
+      if [ "$PERMS" != "644" ] && [ "$PERMS" != "640" ]; then
+        echo "[SECURITY] ВНИМАНИЕ: Небезопасные права на $conf_file: $PERMS" | tee -a "$SECURITY_REPORT"
+      else
+        echo "[SECURITY] OK: Безопасные права на $conf_file: $PERMS" | tee -a "$SECURITY_REPORT"
+      fi
+      break
+    fi
+  done
+  
+  # Check Redis data directory permissions
+  REDIS_DATA_DIR=$(timeout "$TIMEOUT" $REDIS_CLI CONFIG GET dir 2>/dev/null | grep -v "dir" | tail -1 | tr -d '"' || echo "")
+  if [ -n "$REDIS_DATA_DIR" ] && [ -d "$REDIS_DATA_DIR" ]; then
+    PERMS=$(stat -c "%a" "$REDIS_DATA_DIR" 2>/dev/null || echo "unknown")
+    if [ "$PERMS" != "755" ] && [ "$PERMS" != "750" ]; then
+      echo "[SECURITY] ВНИМАНИЕ: Небезопасные права на директорию данных: $PERMS" | tee -a "$SECURITY_REPORT"
+    else
+      echo "[SECURITY] OK: Безопасные права на директорию данных: $PERMS" | tee -a "$SECURITY_REPORT"
+    fi
+  fi
+  
+  # Check for open ports
+  hdr "Open Ports Security Check"
+  
+  # Check if Redis is listening on all interfaces
+  if ss -tlnp | grep -q ":6379.*redis"; then
+    echo "[SECURITY] INFO: Redis слушает на порту 6379" | tee -a "$SECURITY_REPORT"
+    
+    # Check if listening on all interfaces (0.0.0.0)
+    if ss -tlnp | grep -q "0.0.0.0:6379"; then
+      echo "[SECURITY] ВНИМАНИЕ: Redis слушает на всех интерфейсах (0.0.0.0:6379)" | tee -a "$SECURITY_REPORT"
+    fi
+  fi
+  
+  # Check for unnecessary open ports
+  OPEN_PORTS=$(ss -tlnp | grep -E ":(6379|6380|6381)" | wc -l)
+  if [ "$OPEN_PORTS" -gt 1 ]; then
+    echo "[SECURITY] ВНИМАНИЕ: Открыто много Redis портов: $OPEN_PORTS" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Generate security summary
+  echo "" | tee -a "$SECURITY_REPORT"
+  echo "===== Security Summary =====" | tee -a "$SECURITY_REPORT"
+  
+  CRITICAL_COUNT=$(grep -c "КРИТИЧНО:" "$SECURITY_REPORT" 2>/dev/null || echo "0")
+  WARNING_COUNT=$(grep -c "ВНИМАНИЕ:" "$SECURITY_REPORT" 2>/dev/null || echo "0")
+  OK_COUNT=$(grep -c "OK:" "$SECURITY_REPORT" 2>/dev/null || echo "0")
+  
+  echo "[SECURITY] Критичных проблем: $CRITICAL_COUNT" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] Предупреждений: $WARNING_COUNT" | tee -a "$SECURITY_REPORT"
+  echo "[SECURITY] OK проверок: $OK_COUNT" | tee -a "$SECURITY_REPORT"
+  
+  if [ "$CRITICAL_COUNT" -gt 0 ]; then
+    echo "[SECURITY] РЕКОМЕНДАЦИЯ: Немедленно устраните критические проблемы безопасности" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  if [ "$WARNING_COUNT" -gt 0 ]; then
+    echo "[SECURITY] РЕКОМЕНДАЦИЯ: Рассмотрите устранение предупреждений безопасности" | tee -a "$SECURITY_REPORT"
+  fi
+  
+  # Add security report to main report
+  echo "" | tee -a "${MASTER_OUT}"
+  echo "===== Security Audit Results =====" | tee -a "${MASTER_OUT}"
+  cat "$SECURITY_REPORT" | tee -a "${MASTER_OUT}"
+  
+  hdr "Security audit завершен"
+else
+  hdr "Security Audit"
+  echo "Security проверки отключены (ENABLE_SECURITY_CHECKS=0)" | tee -a "${MASTER_OUT}"
+fi
+
 # ===== Сводка путей =====
 {
   hdr "Сводка путей"
@@ -539,9 +721,9 @@ sed -n '1,300p' "${MASTER_OUT}" 2>/dev/null | write_audit_summary "$SUMMARY_COPY
 # Use centralized archive helper; it will exclude access/error logs and verify counts
 create_and_verify_archive "${WORKDIR}" "redis.tgz"
 
+# Log completion after archive creation
 {
   hdr "Готово"
-  echo "OK: результаты в ${WORKDIR}"
+  echo "OK: результаты архивированы"
   echo "Архив: ${AUDIT_DIR}/redis.tgz"
-
-} >>"${MASTER_OUT}" 2>&1
+} | write_audit_summary "$AUDIT_DIR/redis_summary.log"

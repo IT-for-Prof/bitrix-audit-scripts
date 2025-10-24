@@ -2,6 +2,9 @@
 # Minimal shared helpers for the audit scripts.
 set -euo pipefail
 
+# Version information
+AUDIT_COMMON_VERSION="2.0.0"
+
 # Central audit dir for short summaries and archives. Scripts may override OUT_DIR/AUDIT_DIR.
 AUDIT_DIR="${AUDIT_DIR:-${HOME}/audit}"
 mkdir -p "$AUDIT_DIR"
@@ -9,6 +12,97 @@ mkdir -p "$AUDIT_DIR"
 # Host/time helpers
 HOST="$(hostname -f 2>/dev/null || hostname)"
 TS="$(date --iso-8601=seconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ===== LOCALE MANAGEMENT =====
+# Critical for proper date parsing from atop/sysstat and other tools
+# Prefer en_US.UTF-8 for predictable parsing, ru_RU.UTF-8 for Russian date display
+
+LANG_PREFS=("en_US.UTF-8" "en_US:en")
+LC_TIME_RU='ru_RU.UTF-8'
+
+# Ensure numeric locale uses dot as decimal separator (critical for awk/printf)
+export LC_NUMERIC=C
+
+# locale_has <locale_name>: check if locale is available in system
+locale_has() {
+  local want_lc
+  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  if locale -a >/dev/null 2>&1; then
+    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+# setup_locale: determine and set SCRIPT_LANGUAGE and SCRIPT_LC_TIME
+# Sets global variables: SCRIPT_LANGUAGE, SCRIPT_LC_TIME
+setup_locale() {
+  # Determine per-command LANGUAGE and LC_TIME without exporting system-wide
+  SCRIPT_LANGUAGE=""
+  for lg in "${LANG_PREFS[@]}"; do
+    if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi
+  done
+  if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
+  
+  if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
+    printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
+  fi
+
+  SCRIPT_LC_TIME=""
+  if locale_has "$LC_TIME_RU"; then
+    SCRIPT_LC_TIME="$LC_TIME_RU"
+  else
+    if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
+    elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
+    else SCRIPT_LC_TIME=C
+    fi
+    if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
+      if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
+      elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
+      else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
+      printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
+      SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
+    else
+      printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
+    fi
+  fi
+}
+
+# with_locale <command...>: run command with proper LANGUAGE and LC_TIME
+with_locale() {
+  LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"
+}
+
+# ===== COMMAND CHECKING =====
+# have <command>: check if command exists in PATH
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# has_command: alias for have (for compatibility)
+has_command() {
+  have "$@"
+}
+
+# check_requirements <module> [commands...]: check required commands for module
+check_requirements() {
+  local module="$1"
+  shift
+  local missing=0
+  
+  for cmd in "$@"; do
+    if ! have "$cmd"; then
+      printf 'WARNING: %s module requires %s (not found)\n' "$module" "$cmd" >&2
+      missing=1
+    fi
+  done
+  
+  if [ $missing -eq 1 ]; then
+    printf 'WARNING: Some requirements missing for %s module\n' "$module" >&2
+    return 1
+  fi
+  return 0
+}
 
 # Prevent Bitrix appliance interactive menu from launching when child shells source
 # system/profile files that call /root/menu.sh. Export these environment variables so
@@ -19,7 +113,6 @@ export BX_NOMENU BITRIX_NO_MENU DISABLE_BITRIX_MENU
 # Prevent child bash instances from sourcing user/system profile files via BASH_ENV/ENV
 # and disable prompts/timeouts so the scripts are non-interactive by default.
 export BASH_ENV=/dev/null ENV=/dev/null
-exec </dev/null || true
 PS1='' PROMPT_COMMAND='' TMOUT=0
 export PS1 PROMPT_COMMAND TMOUT
 
@@ -102,4 +195,4 @@ create_and_verify_archive(){
 }
 
 # Export commonly used vars for scripts that source this file
-export AUDIT_DIR HOST TS
+export AUDIT_DIR HOST TS AUDIT_COMMON_VERSION LC_NUMERIC

@@ -1,0 +1,1485 @@
+#!/usr/bin/env bash
+# Check requirements for Bitrix24 audit scripts
+# Usage: ./check_requirements.sh [--module MODULE] [--verbose]
+
+set -euo pipefail
+
+# Version information
+VERSION="2.2.0"
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common functions
+source "$SCRIPT_DIR/audit_common.sh"
+
+# Setup locale using common functions
+setup_locale
+
+# Show help
+show_help() {
+    cat << EOF
+Bitrix24 Audit Requirements Checker v$VERSION
+
+Usage: $0 [OPTIONS]
+
+OPTIONS:
+    --module MODULE          Check requirements for specific module
+    --verbose, -v            Enable verbose output
+    --help, -h               Show this help
+
+MODULES:
+    nginx                    Check nginx requirements
+    apache                   Check apache requirements
+    mysql                    Check mysql requirements
+    php                      Check php requirements
+    redis                    Check redis requirements
+    system                   Check system requirements
+    atop                     Check atop requirements
+    sar                      Check sar requirements
+    cron                     Check cron requirements
+    tuned                    Check tuned-adm requirements
+    bitrix                   Check Bitrix-specific requirements
+    tools                    Check additional tools (mysqltuner, pt-tools, etc)
+    security                 Check security tools (lynis, debsecan, firewall tools)
+    all                      Check all requirements (default)
+
+EXAMPLES:
+    $0                       # Check all requirements
+    $0 --module nginx        # Check only nginx requirements
+    $0 --verbose             # Check all requirements with verbose output
+    $0 --module tools --verbose # Check additional tools with verbose output
+
+EOF
+}
+
+# Default settings
+VERBOSE=0
+MODULE=""
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --module)
+            shift
+            MODULE="$1"
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=1
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Helper functions
+log() {
+    echo "$*"
+}
+
+log_verbose() {
+    if [ "$VERBOSE" = "1" ]; then
+        echo "VERBOSE: $*"
+    fi
+}
+
+log_error() {
+    echo "ERROR: $*" >&2
+}
+
+log_warning() {
+    echo "WARNING: $*" >&2
+}
+
+# Get service ports
+get_service_ports() {
+    local process_name="$1"
+    local ports=""
+    
+    # Try netstat first, fallback to ss
+    if command -v netstat >/dev/null 2>&1; then
+        ports=$(netstat -tlnp 2>/dev/null | grep "$process_name" | awk '{print $4}' | sed 's/.*://g' | grep -E '^[0-9]+$' | sort -u | tr '\n' ',' | sed 's/,$//')
+    elif command -v ss >/dev/null 2>&1; then
+        ports=$(ss -tlnp 2>/dev/null | grep "$process_name" | awk '{print $5}' | sed 's/.*://g' | grep -E '^[0-9]+$' | sort -u | tr '\n' ',' | sed 's/,$//')
+    fi
+    
+    echo "$ports"
+}
+
+# Get service sockets
+get_service_sockets() {
+    local process_name="$1"
+    local sockets=""
+    
+    # Extract Unix sockets using ss
+    if command -v ss >/dev/null 2>&1; then
+        sockets=$(ss -xlnp 2>/dev/null | grep "$process_name" | awk '{print $5}' | grep '^/' | sort -u | tr '\n' ',' | sed 's/,$//')
+    fi
+    
+    echo "$sockets"
+}
+
+# Get MySQL details
+get_mysql_details() {
+    local details=""
+    local ports=""
+    local sockets=""
+    local version=""
+    local datadir=""
+    
+    # Get TCP ports
+    ports=$(get_service_ports "mysqld")
+    
+    # Get Unix sockets
+    sockets=$(get_service_sockets "mysqld")
+    
+    # Get MySQL version
+    if command -v mysql >/dev/null 2>&1; then
+        version=$(mysql --version 2>/dev/null | head -n1 | sed 's/.*Ver //' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Get data directory
+    if command -v mysqld >/dev/null 2>&1; then
+        datadir=$(mysqld --help --verbose 2>/dev/null | grep "^datadir" | awk '{print $2}' | head -n1 || echo "unknown")
+    fi
+    
+    # Build details string
+    if [ -n "$ports" ]; then
+        details="TCP Ports: $ports"
+    fi
+    
+    if [ -n "$sockets" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Unix Socket: $sockets"
+        else
+            details="Unix Socket: $sockets"
+        fi
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$datadir" ] && [ "$datadir" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Data Dir: $datadir"
+        else
+            details="Data Dir: $datadir"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Get Redis details
+get_redis_details() {
+    local details=""
+    local ports=""
+    local sockets=""
+    local version=""
+    local mode=""
+    local memory=""
+    
+    # Get TCP ports
+    ports=$(get_service_ports "redis-server")
+    
+    # Get Unix sockets
+    sockets=$(get_service_sockets "redis-server")
+    
+    # Get Redis version
+    if command -v redis-server >/dev/null 2>&1; then
+        version=$(redis-server --version 2>/dev/null | head -n1 | sed 's/.*v=//' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Get Redis mode and memory info via redis-cli
+    if command -v redis-cli >/dev/null 2>&1; then
+        # Try to get info from Redis server
+        if redis-cli ping >/dev/null 2>&1; then
+            mode=$(redis-cli info replication 2>/dev/null | grep "role:" | cut -d: -f2 | tr -d '\r' || echo "unknown")
+            memory=$(redis-cli config get maxmemory 2>/dev/null | tail -n1 | sed 's/^0$//' || echo "unknown")
+        fi
+    fi
+    
+    # Build details string
+    if [ -n "$ports" ]; then
+        details="TCP Port: $ports"
+    fi
+    
+    if [ -n "$sockets" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Unix Socket: $sockets"
+        else
+            details="Unix Socket: $sockets"
+        fi
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$mode" ] && [ "$mode" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Mode: $mode"
+        else
+            details="Mode: $mode"
+        fi
+    fi
+    
+    if [ -n "$memory" ] && [ "$memory" != "unknown" ] && [ "$memory" != "" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Max Memory: $memory"
+        else
+            details="Max Memory: $memory"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Get Memcached details
+get_memcached_details() {
+    local details=""
+    local ports=""
+    local version=""
+    local memory=""
+    local connections=""
+    
+    # Get TCP ports
+    ports=$(get_service_ports "memcached")
+    
+    # Get Memcached version
+    if command -v memcached >/dev/null 2>&1; then
+        version=$(memcached -h 2>/dev/null | head -n1 | sed 's/.*memcached //' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Try to get memory and connection info via telnet/nc
+    if [ -n "$ports" ]; then
+        local port=$(echo "$ports" | cut -d',' -f1)
+        if command -v nc >/dev/null 2>&1; then
+            # Get stats from memcached
+            local stats_output
+            stats_output=$(echo "stats" | nc localhost "$port" 2>/dev/null | head -n20)
+            if [ -n "$stats_output" ]; then
+                memory=$(echo "$stats_output" | grep "limit_maxbytes" | awk '{print $3}' | head -n1)
+                connections=$(echo "$stats_output" | grep "max_connections" | awk '{print $3}' | head -n1)
+            fi
+        fi
+    fi
+    
+    # Build details string
+    if [ -n "$ports" ]; then
+        details="TCP Port: $ports"
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$memory" ] && [ "$memory" != "0" ]; then
+        # Convert bytes to MB
+        local memory_mb=$((memory / 1024 / 1024))
+        if [ -n "$details" ]; then
+            details="$details, Memory: ${memory_mb}MB"
+        else
+            details="Memory: ${memory_mb}MB"
+        fi
+    fi
+    
+    if [ -n "$connections" ] && [ "$connections" != "0" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Max Connections: $connections"
+        else
+            details="Max Connections: $connections"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Get PHP-FPM details
+get_php_fpm_details() {
+    local details=""
+    local ports=""
+    local sockets=""
+    local version=""
+    local pools=""
+    
+    # Get TCP ports
+    ports=$(get_service_ports "php-fpm")
+    
+    # Get Unix sockets
+    sockets=$(get_service_sockets "php-fpm")
+    
+    # Get PHP version
+    if command -v php >/dev/null 2>&1; then
+        version=$(php --version 2>/dev/null | head -n1 | sed 's/PHP //' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Get PHP-FPM pools
+    if command -v php-fpm >/dev/null 2>&1; then
+        # Look for pool configuration files
+        local pool_dirs=("/etc/php-fpm.d" "/etc/php/*/fpm/pool.d" "/etc/php/*/php-fpm.d")
+        local pool_count=0
+        
+        for dir in "${pool_dirs[@]}"; do
+            if [ -d "$dir" ]; then
+                pool_count=$((pool_count + $(find "$dir" -name "*.conf" 2>/dev/null | wc -l)))
+            fi
+        done
+        
+        if [ "$pool_count" -gt 0 ]; then
+            pools="$pool_count pools"
+        fi
+    fi
+    
+    # Build details string
+    if [ -n "$ports" ]; then
+        details="TCP Port: $ports"
+    fi
+    
+    if [ -n "$sockets" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Unix Socket: $sockets"
+        else
+            details="Unix Socket: $sockets"
+        fi
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$pools" ]; then
+        if [ -n "$details" ]; then
+            details="$details, $pools"
+        else
+            details="$pools"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Get Nginx details
+get_nginx_details() {
+    local details=""
+    local ports=""
+    local version=""
+    local workers=""
+    local config=""
+    
+    # Get TCP ports
+    ports=$(get_service_ports "nginx")
+    
+    # Get Nginx version
+    if command -v nginx >/dev/null 2>&1; then
+        version=$(nginx -v 2>&1 | sed 's/nginx version: nginx\///' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Get worker processes count
+    if command -v nginx >/dev/null 2>&1; then
+        workers=$(nginx -T 2>/dev/null | grep "worker_processes" | head -n1 | awk '{print $2}' | sed 's/;//' || echo "unknown")
+    fi
+    
+    # Get main config file
+    if command -v nginx >/dev/null 2>&1; then
+        config=$(nginx -T 2>/dev/null | grep "# configuration file" | head -n1 | sed 's/# configuration file //' || echo "unknown")
+    fi
+    
+    # Build details string
+    if [ -n "$ports" ]; then
+        details="TCP Ports: $ports"
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$workers" ] && [ "$workers" != "unknown" ] && [ "$workers" != "auto" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Workers: $workers"
+        else
+            details="Workers: $workers"
+        fi
+    fi
+    
+    if [ -n "$config" ] && [ "$config" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Config: $config"
+        else
+            details="Config: $config"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Get Apache details
+get_apache_details() {
+    local details=""
+    local ports=""
+    local version=""
+    local mpm=""
+    local config=""
+    
+    # Get TCP ports
+    ports=$(get_service_ports "httpd")
+    if [ -z "$ports" ]; then
+        ports=$(get_service_ports "apache2")
+    fi
+    
+    # Get Apache version
+    if command -v httpd >/dev/null 2>&1; then
+        version=$(httpd -v 2>&1 | head -n1 | sed 's/.*Server version: Apache\///' | sed 's/ .*//' || echo "unknown")
+    elif command -v apache2 >/dev/null 2>&1; then
+        version=$(apache2 -v 2>&1 | head -n1 | sed 's/.*Server version: Apache\///' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Get MPM (Multi-Processing Module)
+    if command -v httpd >/dev/null 2>&1; then
+        mpm=$(httpd -l 2>/dev/null | grep -E "(prefork|worker|event)" | head -n1 | sed 's/.*\(prefork\|worker\|event\).*/\1/' || echo "unknown")
+    elif command -v apache2 >/dev/null 2>&1; then
+        mpm=$(apache2 -l 2>/dev/null | grep -E "(prefork|worker|event)" | head -n1 | sed 's/.*\(prefork\|worker\|event\).*/\1/' || echo "unknown")
+    fi
+    
+    # Get main config file
+    if command -v httpd >/dev/null 2>&1; then
+        config=$(httpd -V 2>/dev/null | grep "SERVER_CONFIG_FILE" | sed 's/.*"\(.*\)".*/\1/' || echo "unknown")
+    elif command -v apache2 >/dev/null 2>&1; then
+        config=$(apache2 -V 2>/dev/null | grep "SERVER_CONFIG_FILE" | sed 's/.*"\(.*\)".*/\1/' || echo "unknown")
+    fi
+    
+    # Build details string
+    if [ -n "$ports" ]; then
+        details="TCP Ports: $ports"
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$mpm" ] && [ "$mpm" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, MPM: $mpm"
+        else
+            details="MPM: $mpm"
+        fi
+    fi
+    
+    if [ -n "$config" ] && [ "$config" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Config: $config"
+        else
+            details="Config: $config"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Get Push-server details
+get_push_server_details() {
+    local details=""
+    local ports=""
+    local version=""
+    local config=""
+    
+    # Get TCP ports
+    ports=$(get_service_ports "push-server")
+    
+    # Get Push-server version (try to get from binary or config)
+    if command -v push-server >/dev/null 2>&1; then
+        version=$(push-server --version 2>/dev/null | head -n1 | sed 's/.*version //' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Get config file
+    local config_paths=("/etc/push-server/push-server.conf" "/etc/push-server.conf" "/opt/push-server/config/push-server.conf")
+    for path in "${config_paths[@]}"; do
+        if [ -f "$path" ]; then
+            config="$path"
+            break
+        fi
+    done
+    
+    # Build details string
+    if [ -n "$ports" ]; then
+        details="TCP Ports: $ports"
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$config" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Config: $config"
+        else
+            details="Config: $config"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Get Sphinx/Manticore details
+get_sphinx_details() {
+    local details=""
+    local ports=""
+    local version=""
+    local indexes=""
+    local config=""
+    local service_name=""
+    
+    # Determine service name (sphinx or manticore)
+    if systemctl is-active sphinx >/dev/null 2>&1; then
+        service_name="sphinx"
+    elif systemctl is-active manticore >/dev/null 2>&1; then
+        service_name="manticore"
+    fi
+    
+    # Get TCP ports
+    ports=$(get_service_ports "searchd")
+    
+    # Get version
+    if command -v searchd >/dev/null 2>&1; then
+        version=$(searchd --help 2>/dev/null | head -n1 | sed 's/.*Sphinx //' | sed 's/ .*//' || echo "unknown")
+    fi
+    
+    # Get indexes count
+    if command -v indexer >/dev/null 2>&1; then
+        indexes=$(indexer --list 2>/dev/null | wc -l || echo "unknown")
+        if [ "$indexes" != "unknown" ] && [ "$indexes" -gt 0 ]; then
+            indexes="$indexes indexes"
+        else
+            indexes=""
+        fi
+    fi
+    
+    # Get config file
+    local config_paths=("/etc/sphinx/sphinx.conf" "/etc/sphinx.conf" "/etc/manticoresearch/manticore.conf" "/etc/manticore.conf")
+    for path in "${config_paths[@]}"; do
+        if [ -f "$path" ]; then
+            config="$path"
+            break
+        fi
+    done
+    
+    # Build details string
+    if [ -n "$service_name" ]; then
+        details="Service: $service_name"
+    fi
+    
+    if [ -n "$ports" ]; then
+        if [ -n "$details" ]; then
+            details="$details, TCP Ports: $ports"
+        else
+            details="TCP Ports: $ports"
+        fi
+    fi
+    
+    if [ -n "$version" ] && [ "$version" != "unknown" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Version: $version"
+        else
+            details="Version: $version"
+        fi
+    fi
+    
+    if [ -n "$indexes" ]; then
+        if [ -n "$details" ]; then
+            details="$details, $indexes"
+        else
+            details="$indexes"
+        fi
+    fi
+    
+    if [ -n "$config" ]; then
+        if [ -n "$details" ]; then
+            details="$details, Config: $config"
+        else
+            details="Config: $config"
+        fi
+    fi
+    
+    echo "$details"
+}
+
+# Check if command exists
+check_command() {
+    local cmd="$1"
+    local description="${2:-$cmd}"
+    
+    if have "$cmd"; then
+        log "✅ $description: found"
+        if [ "$VERBOSE" = "1" ]; then
+            local version
+            version=$("$cmd" --version 2>/dev/null | head -n1 || echo "version unknown")
+            log_verbose "  Version: $version"
+        fi
+        return 0
+    else
+        log "❌ $description: not found"
+        return 1
+    fi
+}
+
+# Check locale availability
+check_locale() {
+    local locale="$1"
+    local description="${2:-$locale}"
+    
+    if locale_has "$locale"; then
+        log "✅ Locale $description: available"
+        return 0
+    else
+        log "❌ Locale $description: not available"
+        return 1
+    fi
+}
+
+# Check system requirements
+check_system_requirements() {
+    log "=== System Requirements ==="
+    local missing=0
+    
+    # Check bash version
+    local bash_version
+    bash_version=$(bash --version | head -n1 | grep -o '[0-9]\+\.[0-9]\+' | head -n1)
+    if [ "$(echo "$bash_version" | cut -d. -f1)" -ge 4 ]; then
+        log "✅ Bash version: $bash_version (>= 4.0 required)"
+    else
+        log "❌ Bash version: $bash_version (< 4.0 required)"
+        missing=1
+    fi
+    
+    # Check core utilities
+    local core_utils=("cat" "date" "find" "grep" "sed" "awk" "sort" "head" "tail" "wc" "tr" "cut" "mktemp" "mkdir" "hostname")
+    for util in "${core_utils[@]}"; do
+        if ! check_command "$util" "Core utility: $util"; then
+            missing=1
+        fi
+    done
+    
+    # Check archive utilities
+    if ! check_command "tar" "Archive utility: tar"; then
+        missing=1
+    fi
+    if ! check_command "gzip" "Compression utility: gzip"; then
+        missing=1
+    fi
+    
+    # Check process utilities
+    if ! check_command "ps" "Process utility: ps"; then
+        missing=1
+    fi
+    
+    # Check network utilities
+    local net_utils=("ss" "netstat" "ip" "curl" "wget")
+    for util in "${net_utils[@]}"; do
+        if ! check_command "$util" "Network utility: $util"; then
+            log_warning "$util not found - some network checks may be limited"
+        fi
+    done
+    
+    return $missing
+}
+
+# Check locale requirements
+check_locale_requirements() {
+    log "=== Locale Requirements ==="
+    local missing=0
+    
+    # Show current locale settings
+    local language="${LANGUAGE:-not set}"
+    local lc_time="${LC_TIME:-not set}"
+    local lc_all="${LC_ALL:-not set}"
+    log "Current locale settings: LANGUAGE=$language, LC_TIME=$lc_time, LC_ALL=$lc_all"
+    
+    # Check critical locales
+    if ! check_locale "en_US.UTF-8" "en_US.UTF-8 (critical for date parsing)"; then
+        missing=1
+    fi
+    
+    if ! check_locale "ru_RU.UTF-8" "ru_RU.UTF-8 (recommended for Russian dates)"; then
+        log_warning "ru_RU.UTF-8 not available - Russian dates may not display correctly"
+    fi
+    
+    # Test date parsing
+    log "Testing date parsing with current locales..."
+    local test_date="2024-01-15 14:30:00"
+    if with_locale date -d "$test_date" +%Y-%m-%d >/dev/null 2>&1; then
+        log "✅ Date parsing test: passed"
+    else
+        log "❌ Date parsing test: failed"
+        missing=1
+    fi
+    
+    return $missing
+}
+
+# Check MySQL requirements
+check_mysql_requirements() {
+    log "=== MySQL Requirements ==="
+    local missing=0
+    
+    # Check MySQL client
+    if ! check_command "mysql" "MySQL client"; then
+        missing=1
+    fi
+    
+    # Check MySQL server status
+    local mysql_running=0
+    local ports=""
+    
+    if systemctl is-active mysql >/dev/null 2>&1; then
+        mysql_running=1
+        ports=$(get_service_ports "mysqld")
+    elif systemctl is-active mysqld >/dev/null 2>&1; then
+        mysql_running=1
+        ports=$(get_service_ports "mysqld")
+    fi
+    
+    if [ "$mysql_running" -eq 1 ]; then
+        local mysql_details
+        mysql_details=$(get_mysql_details)
+        if [ -n "$mysql_details" ]; then
+            log "✅ MySQL server: running ($mysql_details)"
+        else
+            log "✅ MySQL server: running"
+        fi
+    else
+        log "❌ MySQL server: not running"
+        missing=1
+    fi
+    
+    return $missing
+}
+
+# Check PHP requirements
+check_php_requirements() {
+    log "=== PHP Requirements ==="
+    local missing=0
+    
+    # Check PHP CLI
+    if ! check_command "php" "PHP CLI"; then
+        missing=1
+    fi
+    
+    # Check PHP-FPM
+    if ! check_command "php-fpm" "PHP-FPM"; then
+        log_warning "PHP-FPM not found - some PHP checks may be limited"
+    else
+        # Check if PHP-FPM is running and get details
+        local php_fpm_running=0
+        if systemctl is-active php-fpm >/dev/null 2>&1; then
+            php_fpm_running=1
+        fi
+        
+        if [ "$php_fpm_running" -eq 1 ]; then
+            local php_fpm_details
+            php_fpm_details=$(get_php_fpm_details)
+            if [ -n "$php_fpm_details" ]; then
+                log "✅ PHP-FPM: running ($php_fpm_details)"
+            else
+                log "✅ PHP-FPM: running"
+            fi
+        else
+            log_warning "PHP-FPM: not running"
+        fi
+    fi
+    
+    # Check PHP extensions
+    local extensions=("mysqli" "pdo_mysql" "redis" "opcache" "json")
+    for ext in "${extensions[@]}"; do
+        if php -m | grep -q "^$ext$"; then
+            log "✅ PHP extension: $ext"
+        else
+            log "❌ PHP extension: $ext (not loaded)"
+            missing=1
+        fi
+    done
+    
+    return $missing
+}
+
+# Check Nginx requirements
+check_nginx_requirements() {
+    log "=== Nginx Requirements ==="
+    local missing=0
+    
+    # Check Nginx
+    if ! check_command "nginx" "Nginx web server"; then
+        missing=1
+    fi
+    
+    # Check Nginx status
+    local nginx_running=0
+    local ports=""
+    
+    if systemctl is-active nginx >/dev/null 2>&1; then
+        nginx_running=1
+        ports=$(get_service_ports "nginx")
+    fi
+    
+    if [ "$nginx_running" -eq 1 ]; then
+        local nginx_details
+        nginx_details=$(get_nginx_details)
+        if [ -n "$nginx_details" ]; then
+            log "✅ Nginx service: running ($nginx_details)"
+        else
+            log "✅ Nginx service: running"
+        fi
+    else
+        log "❌ Nginx service: not running"
+        missing=1
+    fi
+    
+    return $missing
+}
+
+# Check Apache requirements
+check_apache_requirements() {
+    log "=== Apache Requirements ==="
+    local missing=0
+    
+    # Check Apache
+    local apache_found=0
+    local apache_type=""
+    
+    if have "apache2"; then
+        apache_found=1
+        apache_type="apache2"
+    elif have "httpd"; then
+        apache_found=1
+        apache_type="httpd"
+    fi
+    
+    if [ "$apache_found" -eq 1 ]; then
+        log "✅ Apache web server: found ($apache_type)"
+    else
+        log "❌ Apache web server: not found"
+        missing=1
+    fi
+    
+    # Check Apache status
+    local apache_running=0
+    local ports=""
+    
+    if systemctl is-active apache2 >/dev/null 2>&1; then
+        apache_running=1
+        ports=$(get_service_ports "apache2")
+    elif systemctl is-active httpd >/dev/null 2>&1; then
+        apache_running=1
+        ports=$(get_service_ports "httpd")
+    fi
+    
+    if [ "$apache_running" -eq 1 ]; then
+        local apache_details
+        apache_details=$(get_apache_details)
+        if [ -n "$apache_details" ]; then
+            log "✅ Apache service: running ($apache_details)"
+        else
+            log "✅ Apache service: running"
+        fi
+    else
+        log "❌ Apache service: not running"
+        missing=1
+    fi
+    
+    return $missing
+}
+
+# Check Redis requirements
+check_redis_requirements() {
+    log "=== Redis Requirements ==="
+    local missing=0
+    
+    # Check Redis CLI
+    if ! check_command "redis-cli" "Redis CLI"; then
+        missing=1
+    fi
+    
+    # Check Redis server
+    if ! check_command "redis-server" "Redis server"; then
+        missing=1
+    fi
+    
+    # Check Redis status
+    local redis_running=0
+    local ports=""
+    
+    if systemctl is-active redis >/dev/null 2>&1; then
+        redis_running=1
+        ports=$(get_service_ports "redis-server")
+    elif systemctl is-active redis-server >/dev/null 2>&1; then
+        redis_running=1
+        ports=$(get_service_ports "redis-server")
+    fi
+    
+    if [ "$redis_running" -eq 1 ]; then
+        local redis_details
+        redis_details=$(get_redis_details)
+        if [ -n "$redis_details" ]; then
+            log "✅ Redis service: running ($redis_details)"
+        else
+            log "✅ Redis service: running"
+        fi
+    else
+        log "❌ Redis service: not running"
+        missing=1
+    fi
+    
+    return $missing
+}
+
+# Check performance monitoring requirements
+check_performance_requirements() {
+    log "=== Performance Monitoring Requirements ==="
+    local missing=0
+    
+    # Check atop
+    if ! check_command "atop" "atop (system monitoring)"; then
+        log_warning "atop not found - system monitoring will be limited"
+    fi
+    
+    # Check sar (sysstat)
+    if ! check_command "sar" "sar (sysstat)"; then
+        log_warning "sar not found - historical performance data will be limited"
+    fi
+    
+    # Check iostat
+    if ! check_command "iostat" "iostat (sysstat)"; then
+        log_warning "iostat not found - disk I/O monitoring will be limited"
+    fi
+    
+    return $missing
+}
+
+# Check security tools (optional)
+check_security_tools() {
+    log "=== Security Tools Requirements (Optional) ==="
+    local missing=0
+    
+    # Detect distribution type
+    local distro_id=""
+    if [ -f /etc/os-release ]; then
+        distro_id=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
+    
+    # Check lynis (common for all)
+    log "--- Security Analysis Tools ---"
+    if ! check_command "lynis" "Lynis (comprehensive security audit tool)"; then
+        log_warning "lynis not found - advanced security analysis will be limited"
+        log "  Install: apt-get install lynis (Debian/Ubuntu) or dnf install lynis (RHEL-family)"
+        echo ""
+        missing=1
+    fi
+    
+    # Check debsecan (Debian/Ubuntu only)
+    case "$distro_id" in
+        "ubuntu"|"debian")
+            if ! check_command "debsecan" "Debsecan (Debian security scanner)"; then
+                log_warning "debsecan not found - CVE scanning will be limited"
+                log "  Install: apt-get install debsecan"
+                echo ""
+                missing=1
+            fi
+            ;;
+    esac
+    
+    # Check yum-plugin-security (RHEL-family only)
+    case "$distro_id" in
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            if command -v yum >/dev/null 2>&1; then
+                if ! rpm -q yum-plugin-security >/dev/null 2>&1; then
+                    log_warning "yum-plugin-security not found - security updates analysis will be limited"
+                    log "  Install: yum install yum-plugin-security"
+                    echo ""
+                    missing=1
+                fi
+            elif command -v dnf >/dev/null 2>&1; then
+                # dnf has built-in updateinfo, no plugin needed
+                log "dnf has built-in security updates support"
+            fi
+            ;;
+    esac
+    
+    # Check curl/wget for API access (common for all)
+    log "--- API Access Tools ---"
+    if ! check_command "curl" "curl (HTTP client for API requests)"; then
+        if ! check_command "wget" "wget (HTTP client for API requests)"; then
+            log_warning "curl/wget not found - endoflife.date API access will be unavailable"
+            log "  Install: apt-get install curl (Debian/Ubuntu) or dnf install curl (RHEL-family)"
+            echo ""
+            missing=1
+        fi
+    fi
+    
+    # Check jq (optional, common for all)
+    if ! check_command "jq" "jq (JSON parser, optional)"; then
+        log_info "jq not found - JSON parsing will use basic methods"
+        log "  Install: apt-get install jq (Debian/Ubuntu) or dnf install jq (RHEL-family)"
+        echo ""
+    fi
+    
+    # Check firewall tools (common for all)
+    log "--- Firewall Tools ---"
+    local firewall_found=0
+    if check_command "ufw" "UFW (Uncomplicated Firewall)"; then
+        firewall_found=1
+    fi
+    
+    if check_command "firewall-cmd" "firewalld (Firewall daemon)"; then
+        firewall_found=1
+    fi
+    
+    if check_command "iptables" "iptables (Packet filter)"; then
+        firewall_found=1
+    fi
+    
+    if [ "$firewall_found" -eq 0 ]; then
+        log_warning "No firewall tools found - firewall analysis will be limited"
+        log "  Install: apt-get install ufw (Debian/Ubuntu) or dnf install firewalld (RHEL-family)"
+        echo ""
+        missing=1
+    fi
+    
+    if [ "$missing" -eq 0 ]; then
+        log_success "All security tools are available"
+        return 0
+    else
+        log_warning "Some security tools are missing (optional but recommended)"
+        return 1
+    fi
+}
+
+# Check additional tools requirements
+check_additional_tools() {
+    log "=== Additional Tools Requirements ==="
+    local missing=0
+    
+    # MySQL tools
+    log "--- MySQL Tools ---"
+    if ! check_command "mysqltuner" "MySQLTuner (MySQL configuration analyzer)"; then
+        log_warning "mysqltuner not found - MySQL configuration analysis will be limited"
+        log "  Install: apt-get install mysqltuner (Debian/Ubuntu)"
+        log "  Or download: https://github.com/major/MySQLTuner-perl"
+        echo ""
+    fi
+    
+    # Percona Toolkit
+    local pt_tools=("pt-query-digest" "pt-mysql-summary" "pt-variable-advisor" "pt-duplicate-key-checker" "pt-index-usage")
+    local pt_found=0
+    for tool in "${pt_tools[@]}"; do
+        if have "$tool"; then
+            pt_found=1
+            log "✅ Percona Toolkit: $tool"
+        fi
+    done
+    
+    if [ "$pt_found" -eq 0 ]; then
+        log_warning "Percona Toolkit not found - advanced MySQL analysis will be limited"
+        log "  Install: apt-get install percona-toolkit (Debian/Ubuntu)"
+        log "  Or: yum install percona-toolkit (CentOS/RHEL)"
+        echo ""
+    fi
+    
+    # Tuned
+    log "--- System Tuning ---"
+    if ! check_command "tuned-adm" "tuned-adm (system tuning)"; then
+        log_warning "tuned-adm not found - system tuning analysis will be limited"
+        log "  Install: apt-get install tuned (Debian/Ubuntu)"
+        log "  Or: yum install tuned (CentOS/RHEL)"
+        echo ""
+    fi
+    
+    # Sysbench
+    if ! check_command "sysbench" "sysbench (benchmarking)"; then
+        log_warning "sysbench not found - benchmarking will be limited"
+        log "  Install: apt-get install sysbench (Debian/Ubuntu)"
+        log "  Or: yum install sysbench (CentOS/RHEL)"
+        echo ""
+    fi
+    
+    # SSL tools
+    log "--- SSL/Security Tools ---"
+    if ! check_command "openssl" "OpenSSL (SSL analysis)"; then
+        log_warning "openssl not found - SSL analysis will be limited"
+    fi
+    
+    if ! check_command "testssl.sh" "testssl.sh (SSL testing)"; then
+        log_warning "testssl.sh not found - SSL testing will be limited"
+        echo ""
+    fi
+    
+    # HTML/PDF generation tools
+    log "--- Report Generation Tools ---"
+    if ! check_command "wkhtmltopdf" "wkhtmltopdf (PDF generation)"; then
+        log_warning "wkhtmltopdf not found - PDF report generation will be limited"
+        log "  Install: apt-get install wkhtmltopdf (Debian/Ubuntu)"
+        echo ""
+    fi
+    
+    if ! check_command "gnuplot" "gnuplot (graphics generation)"; then
+        log_warning "gnuplot not found - graphics generation will be limited"
+        log "  Install: apt-get install gnuplot (Debian/Ubuntu)"
+        echo ""
+    fi
+    
+    return $missing
+}
+
+# Check Bitrix-specific requirements
+check_bitrix_requirements() {
+    log "=== Bitrix-Specific Requirements ==="
+    local missing=0
+    
+    # Check Bitrix directories
+    local bitrix_dirs=("/var/www/bitrix" "/home/bitrix/www" "/opt/bitrix")
+    local bitrix_found=0
+    
+    for dir in "${bitrix_dirs[@]}"; do
+        if [ -d "$dir" ]; then
+            log "✅ Bitrix directory: $dir"
+            bitrix_found=1
+        fi
+    done
+    
+    if [ "$bitrix_found" -eq 0 ]; then
+        log_warning "Bitrix directory not found in standard locations"
+        log "  Expected locations: ${bitrix_dirs[*]}"
+    fi
+    
+    # Check push-server
+    local push_running=0
+    local push_ports=""
+    
+    if systemctl is-active push-server >/dev/null 2>&1; then
+        push_running=1
+        push_ports=$(get_service_ports "push-server")
+    fi
+    
+    if [ "$push_running" -eq 1 ]; then
+        local push_details
+        push_details=$(get_push_server_details)
+        if [ -n "$push_details" ]; then
+            log "✅ Push-server: running ($push_details)"
+        else
+            log "✅ Push-server: running"
+        fi
+    else
+        log_warning "Push-server: not running or not found"
+    fi
+    
+    # Check Sphinx/Manticore
+    local search_running=0
+    local search_ports=""
+    
+    if systemctl is-active sphinx >/dev/null 2>&1; then
+        search_running=1
+        search_ports=$(get_service_ports "searchd")
+    elif systemctl is-active manticore >/dev/null 2>&1; then
+        search_running=1
+        search_ports=$(get_service_ports "searchd")
+    fi
+    
+    if [ "$search_running" -eq 1 ]; then
+        local search_details
+        search_details=$(get_sphinx_details)
+        if [ -n "$search_details" ]; then
+            log "✅ Sphinx/Manticore: running ($search_details)"
+        else
+            log "✅ Sphinx/Manticore: running"
+        fi
+    else
+        log_warning "Sphinx/Manticore: not running or not found"
+    fi
+    
+    # Check Memcached
+    local memcached_running=0
+    local memcached_ports=""
+    
+    if systemctl is-active memcached >/dev/null 2>&1; then
+        memcached_running=1
+        memcached_ports=$(get_service_ports "memcached")
+    fi
+    
+    if [ "$memcached_running" -eq 1 ]; then
+        local memcached_details
+        memcached_details=$(get_memcached_details)
+        if [ -n "$memcached_details" ]; then
+            log "✅ Memcached: running ($memcached_details)"
+        else
+            log "✅ Memcached: running"
+        fi
+    else
+        log_warning "Memcached: not running or not found"
+    fi
+    
+    return $missing
+}
+
+# Check cron requirements
+check_permissions_requirements() {
+    log "=== Проверка прав доступа ==="
+    
+    if [ "$EUID" -eq 0 ]; then
+        log "✅ Root-права: есть (полный аудит)"
+    else
+        log "⚠️  Root-права: НЕТ (ограниченный аудит)"
+        log "Недоступно: /var/log/, /etc/, smartctl, dmidecode"
+        log "Рекомендация: sudo ./run_all_audits.sh --all"
+    fi
+}
+
+check_cron_requirements() {
+    log "=== Cron Requirements ==="
+    local missing=0
+    
+    # Check cron service
+    if systemctl is-active cron >/dev/null 2>&1 || systemctl is-active crond >/dev/null 2>&1; then
+        log "✅ Cron service: running"
+    else
+        log "❌ Cron service: not running"
+        missing=1
+    fi
+    
+    # Check cron directories
+    local cron_dirs=("/etc/cron.d" "/etc/cron.daily" "/etc/cron.hourly" "/etc/cron.weekly" "/etc/cron.monthly")
+    for dir in "${cron_dirs[@]}"; do
+        if [ -d "$dir" ]; then
+            log "✅ Cron directory: $dir"
+        else
+            log_warning "Cron directory not found: $dir"
+        fi
+    done
+    
+    return $missing
+}
+
+# Generate installation recommendations
+generate_installation_recommendations() {
+    log "=== Installation Recommendations ==="
+    
+    # Detect distribution and version
+    local distro="unknown"
+    local version="unknown"
+    local package_manager=""
+    
+    if [ -f /etc/os-release ]; then
+        distro=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+        version=$(grep "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
+    
+    log "Detected distribution: $distro (version: $version)"
+    echo
+    
+    case "$distro" in
+        "ubuntu"|"debian")
+            log "Debian/Ubuntu installation commands:"
+            echo "  sudo apt-get update"
+            echo "  sudo apt-get install mysqltuner percona-toolkit tuned sysbench"
+            echo "  sudo apt-get install wkhtmltopdf gnuplot"
+            echo "  sudo apt-get install testssl.sh"
+            ;;
+        "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            log "RHEL-family (AlmaLinux/Rocky/CentOS/RHEL/Fedora) installation commands:"
+            echo "  # Install EPEL repository (contains mysqltuner, sysbench)"
+            echo "  sudo dnf install -y epel-release"
+            echo ""
+            echo "  # Install Percona repository (for percona-toolkit)"
+            echo "  sudo dnf install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm"
+            echo ""
+            echo "  # Install required packages"
+            echo "  sudo dnf install -y tuned mysqltuner percona-toolkit gnuplot sysbench"
+            echo ""
+            echo "  # Optional packages (may not be available in all repositories):"
+            echo "  # wkhtmltopdf - try RPMFusion or manual installation:"
+            echo "  #   sudo dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-\$(rpm -E %rhel).noarch.rpm"
+            echo "  #   sudo dnf install -y wkhtmltopdf"
+            echo "  #   OR download from: https://wkhtmltopdf.org/downloads.html"
+            echo ""
+            echo "  # For testssl.sh (manual installation):"
+            echo "  curl -O https://raw.githubusercontent.com/drwetter/testssl.sh/master/testssl.sh"
+            echo "  chmod +x testssl.sh"
+            echo "  sudo mv testssl.sh /usr/local/bin/"
+            ;;
+        *)
+            log "Unknown distribution - manual installation required"
+            echo "  MySQLTuner: https://github.com/major/MySQLTuner-perl"
+            echo "  Percona Toolkit: https://www.percona.com/downloads/percona-toolkit/"
+            echo "  testssl.sh: https://github.com/drwetter/testssl.sh"
+            echo ""
+            echo "  For RHEL-family distributions, try:"
+            echo "  sudo dnf install -y epel-release"
+            echo "  sudo dnf install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm"
+            echo "  sudo dnf install -y tuned mysqltuner percona-toolkit gnuplot sysbench"
+            ;;
+    esac
+}
+
+# Main execution
+main() {
+    log "Bitrix24 Audit Requirements Checker v$VERSION"
+    log "Checking requirements for: ${MODULE:-all}"
+    echo
+    
+    local total_missing=0
+    
+    # Check system requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "system" ]; then
+        if ! check_system_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check locale requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "system" ]; then
+        if ! check_locale_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check MySQL requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "mysql" ]; then
+        if ! check_mysql_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check PHP requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "php" ]; then
+        if ! check_php_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check Nginx requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "nginx" ]; then
+        if ! check_nginx_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check Apache requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "apache" ]; then
+        if ! check_apache_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check Redis requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "redis" ]; then
+        if ! check_redis_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check performance monitoring requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "atop" ] || [ "$MODULE" = "sar" ]; then
+        if ! check_performance_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check additional tools
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "tools" ]; then
+        if ! check_additional_tools; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check security tools (optional)
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "security" ]; then
+        if ! check_security_tools; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check Bitrix-specific requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "bitrix" ]; then
+        if ! check_bitrix_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Check permissions requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "permissions" ]; then
+        check_permissions_requirements
+        echo
+    fi
+    
+    # Check cron requirements
+    if [ -z "$MODULE" ] || [ "$MODULE" = "all" ] || [ "$MODULE" = "cron" ]; then
+        if ! check_cron_requirements; then
+            total_missing=1
+        fi
+        echo
+    fi
+    
+    # Generate installation recommendations
+    if [ "$total_missing" -gt 0 ] || [ "$VERBOSE" = "1" ]; then
+        generate_installation_recommendations
+        echo
+    fi
+    
+    # Final summary
+    if [ "$total_missing" -eq 0 ]; then
+        log "✅ All requirements satisfied!"
+        exit 0
+    else
+        log "❌ Some requirements are missing. See recommendations above."
+        exit 1
+    fi
+}
+
+# Run main function
+main "$@"

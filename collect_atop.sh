@@ -7,9 +7,37 @@
 # deterministically in automation systems (cron, systemd, CI).
 set -euo pipefail
 if [ -z "${_STERILE:-}" ] && { [[ $- == *i* ]] || [ -n "${BASH_ENV:-}" ]; }; then
-  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color BASH_ENV= _STERILE=1 \
+  # Determine best available locale for sterile environment
+  _detect_locale() {
+    if locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+      echo "en_US.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+      echo "en_US.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.UTF-8$'; then
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^ru_RU\.utf8$'; then
+      echo "ru_RU.utf8"
+      echo "ru_RU.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+      echo "C.UTF-8"
+    elif locale -a 2>/dev/null | grep -qi '^C\.utf8$'; then
+      echo "C.utf8"
+    elif locale -a 2>/dev/null | grep -qi '^POSIX$'; then
+      echo "POSIX"
+    else
+      echo "C"
+    fi
+  }
+  
+  _LOCALE="$(_detect_locale)"
+  exec env -i HOME=/root PATH=/usr/sbin:/usr/bin:/bin TERM=xterm-256color \
+    LANG="$_LOCALE" LANGUAGE="$_LOCALE" \
+    BASH_ENV= _STERILE=1 \
     bash --noprofile --norc "$0" "$@"
 fi
+
+# Version information
+VERSION="2.1.0"
 
 # Basic helpers
 say() { printf '%s\n' "$*"; }
@@ -24,63 +52,28 @@ mkdir -p "$OUT_DIR"
 # Use shared audit_common helper for AUDIT_DIR
 source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 
+# Setup locale using common functions
+setup_locale
+
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "================================================" >&2
+    echo "ВНИМАНИЕ: Скрипт запущен БЕЗ root-прав" >&2
+    echo "Некоторые данные будут недоступны:" >&2
+    echo "  - Логи в /var/log/" >&2
+    echo "  - Конфигурации в /etc/" >&2
+    echo "  - Системные команды (smartctl, dmidecode)" >&2
+    echo "Для полного аудита запустите: sudo $0 $*" >&2
+    echo "================================================" >&2
+    echo ""
+fi
+
 # full-day by default
 FULL_DAY="${FULL_DAY:-1}"
 TOPN="${TOPN:-5}"
 
-# minimal checks
-if ! command -v atopsar >/dev/null 2>&1; then
-  die "atopsar not found in PATH — please install 'atop' or ensure atopsar is available"
-fi
-
-# Ensure per-process LC_TIME for consistent time formatting (do not modify system-wide settings)
-# Prefer ru_RU.UTF-8, fall back to en_US.UTF-8, then en_US:en, then C if needed.
-# LANGUAGE and LC_TIME policy (do not modify system-wide settings)
-# - Ensure commands inside the script run with LANGUAGE=en_US.UTF-8 (fallback en_US:en)
-# - Ensure LC_TIME=ru_RU.UTF-8 when available; if ru isn't available, try to ensure
-#   LANGUAGE is en_US.UTF-8 (fallback en_US:en) and use an en_US LC_TIME if needed.
-
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
-
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
-
-# Determine per-command LANGUAGE and LC_TIME without exporting system-wide
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi; done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
-fi
-
-SCRIPT_LC_TIME=""
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
-  else SCRIPT_LC_TIME=C
-  fi
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-    SCRIPT_LANGUAGE="$NEW_SCRIPT_LANG"
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
-fi
-
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
+# Check requirements using common function
+check_requirements "ATOP" with_locale atopsar
 
 declare -a LOGS=()
 # Determine LOGPATH from systemd unit or config, with sensible fallbacks.
@@ -130,17 +123,17 @@ if [ "${#LOGS[@]}" -gt 0 ]; then
     [ -n "$DAY_LABEL" ] || DAY_LABEL="$(basename "$F")"
     say "Processing day: $DAY_LABEL (file: $F)"
     if [ "${FULL_DAY}" = "1" ] || [ "${FULL_DAY}" = "true" ]; then
-      run atopsar -O -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_CPU.txt" >/dev/null || true
-      run atopsar -G -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_MEM.txt" >/dev/null || true
-      run atopsar -D -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_DSK.txt" >/dev/null || true
-      run atopsar -N -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_NET.txt" >/dev/null || true
-      run atopsar -A -r "$F" > "${OUT_DIR}/SYSTEM_${DAY_LABEL}_${WIN_LABEL:-ALL}.txt" || true
+      run with_locale atopsar -O -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_CPU.txt" >/dev/null || true
+      run with_locale atopsar -G -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_MEM.txt" >/dev/null || true
+      run with_locale atopsar -D -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_DSK.txt" >/dev/null || true
+      run with_locale atopsar -N -S -r "$F" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_NET.txt" >/dev/null || true
+      run with_locale atopsar -A -r "$F" > "${OUT_DIR}/SYSTEM_${DAY_LABEL}_${WIN_LABEL:-ALL}.txt" || true
     else
-      run atopsar -O -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_CPU.txt" >/dev/null || true
-      run atopsar -G -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_MEM.txt" >/dev/null || true
-      run atopsar -D -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_DSK.txt" >/dev/null || true
-      run atopsar -N -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_NET.txt" >/dev/null || true
-      run atopsar -A -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" > "${OUT_DIR}/SYSTEM_${DAY_LABEL}_${WIN_LABEL:-WINDOW}.txt" || true
+      run with_locale atopsar -O -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_CPU.txt" >/dev/null || true
+      run with_locale atopsar -G -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_MEM.txt" >/dev/null || true
+      run with_locale atopsar -D -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_DSK.txt" >/dev/null || true
+      run with_locale atopsar -N -S -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" | tee "${OUT_DIR}/RAW_TOP5_${DAY_LABEL}_NET.txt" >/dev/null || true
+      run with_locale atopsar -A -r "$F" -b "${B:-09:00}" -e "${E:-19:00}" > "${OUT_DIR}/SYSTEM_${DAY_LABEL}_${WIN_LABEL:-WINDOW}.txt" || true
     fi
   done
 
@@ -297,7 +290,7 @@ fi
 # ===== 3) Полная системная сводка (для сверки) =====
 # ===== DETAILED SUMMARY: top processes, percentiles, spikes =====
 mkdir -p "${OUT_DIR}" || true
-SUMMARY_FILE="${OUT_DIR}/SUMMARY_DETAILED_${WIN_LABEL:-ALL}.txt"
+SUMMARY_FILE="${AUDIT_DIR}/atop_SUMMARY_DETAILED_${WIN_LABEL:-ALL}.txt"
 {
   echo "Detailed atop summary"
   echo "Window: ${B:-} - ${E:-}"
@@ -389,7 +382,7 @@ fi
 
 # ===== 4) Архив =====
 # By default keep a single archive per service under $AUDIT_DIR with no date suffix
-FINAL_REPORT="${OUT_DIR}/REPORT_${WIN_LABEL:-ALL}.txt"
+FINAL_REPORT="${AUDIT_DIR}/atop_REPORT_${WIN_LABEL:-ALL}.txt"
 {
   echo "ATOP AUDIT REPORT"
   echo "Window: ${B:-} - ${E:-}"
@@ -458,7 +451,7 @@ echo "==== END SUMMARY ===="
 
 # ===== 3) Полная системная сводка (для сверки) =====
 # ===== DETAILED SUMMARY: top processes, percentiles, spikes =====
-SUMMARY_FILE="${OUT_DIR}/SUMMARY_DETAILED_${WIN_LABEL:-ALL}.txt"
+SUMMARY_FILE="${AUDIT_DIR}/atop_SUMMARY_DETAILED_${WIN_LABEL:-ALL}.txt"
 {
   echo "Detailed atop summary"
   echo "Window: ${B:-} - ${E:-}"
@@ -552,7 +545,7 @@ fi
 # By default keep a single archive per service under $HOME with no date suffix
 ARCHIVE="${ARCHIVE:-${AUDIT_DIR:-${HOME}/audit}/atop.tgz}"
 # Create a final human-readable report that includes TOP20 and the detailed summary
-FINAL_REPORT="${OUT_DIR}/REPORT_${WIN_LABEL:-ALL}.txt"
+FINAL_REPORT="${AUDIT_DIR}/atop_REPORT_${WIN_LABEL:-ALL}.txt"
 {
   echo "ATOP AUDIT REPORT"
   echo "Window: ${B:-} - ${E:-}"
@@ -576,9 +569,8 @@ say "Упаковка архива"
 source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 ATOP_SUMMARY_COPY="$AUDIT_DIR/atop_summary.log"
 if [ -f "$SUMMARY_FILE" ]; then sed -n '1,500p' "$SUMMARY_FILE"; else echo "(no detailed summary)"; fi | write_audit_summary "$ATOP_SUMMARY_COPY"
-create_and_verify_archive "$OUT_DIR" "atop.tgz"
 
-# ===== 5) Итоги =====
+# ===== 5) Итоги (до архивирования) =====
 say "Готово"
 # human-friendly listing without parsing ls output
 find "$OUT_DIR" -maxdepth 1 -type f -printf "%M %s %p\n" | sed -n '1,200p' || true
@@ -616,3 +608,6 @@ echo "-- Small files in $OUT_DIR (size < 1K) --"
 find "$OUT_DIR" -maxdepth 1 -type f -size -1k -printf "%f (%s bytes)\n" | sed -n '1,200p' || true
 
 echo "==== END SUMMARY ===="
+
+# ===== 6) Архивирование (после всех операций чтения) =====
+create_and_verify_archive "$OUT_DIR" "atop.tgz"

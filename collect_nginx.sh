@@ -28,50 +28,24 @@ fi
 set -Euo pipefail
 
 # --- 0. Локаль/пути
-# Use per-command LANGUAGE and LC_TIME (do not modify system-wide env)
-LANG_PREFS=("en_US.UTF-8" "en_US:en")
-LC_TIME_RU='ru_RU.UTF-8'
+# Use shared audit_common.sh for locale management
+source "$(dirname -- "${BASH_SOURCE[0]:-$0}")/audit_common.sh"
 
-locale_has() {
-  local want_lc
-  want_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if locale -a >/dev/null 2>&1; then
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -x -- "${want_lc}" >/dev/null 2>&1
-    return $?
-  fi
-  return 1
-}
+# Setup locale using common functions
+setup_locale
 
-# Determine per-command LANGUAGE and LC_TIME without exporting system-wide
-SCRIPT_LANGUAGE=""
-for lg in "${LANG_PREFS[@]}"; do
-  if locale_has "$lg"; then SCRIPT_LANGUAGE="$lg"; break; fi
-done
-if [ -z "$SCRIPT_LANGUAGE" ]; then SCRIPT_LANGUAGE="en_US:en"; fi
-if [ "${LANGUAGE:-}" != "$SCRIPT_LANGUAGE" ]; then
-  printf 'NOTICE: LANGUAGE=%s, will use LANGUAGE=%s for commands in this script only\n' "${LANGUAGE:-unset}" "$SCRIPT_LANGUAGE" >&2
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "================================================" >&2
+    echo "ВНИМАНИЕ: Скрипт запущен БЕЗ root-прав" >&2
+    echo "Некоторые данные будут недоступны:" >&2
+    echo "  - Логи в /var/log/nginx/" >&2
+    echo "  - Конфигурации в /etc/nginx/" >&2
+    echo "  - Системные команды (smartctl, dmidecode)" >&2
+    echo "Для полного аудита запустите: sudo $0 $*" >&2
+    echo "================================================" >&2
+    echo ""
 fi
-
-SCRIPT_LC_TIME=""
-if locale_has "$LC_TIME_RU"; then
-  SCRIPT_LC_TIME="$LC_TIME_RU"
-else
-  if locale_has "en_US.UTF-8"; then SCRIPT_LC_TIME="en_US.UTF-8"
-  elif locale_has "en_US:en"; then SCRIPT_LC_TIME="en_US:en"
-  else SCRIPT_LC_TIME=C
-  fi
-  if [[ "$SCRIPT_LANGUAGE" != "en_US.UTF-8" ]]; then
-    if locale_has "en_US.UTF-8"; then NEW_SCRIPT_LANG="en_US.UTF-8"
-    elif locale_has "en_US:en"; then NEW_SCRIPT_LANG="en_US:en"
-    else NEW_SCRIPT_LANG="$SCRIPT_LANGUAGE"; fi
-    printf 'NOTICE: ru_RU.UTF-8 LC_TIME not available; will use LC_TIME=%s and LANGUAGE=%s for commands in this script only\n' "$SCRIPT_LC_TIME" "$NEW_SCRIPT_LANG" >&2
-  else
-    printf 'NOTICE: LC_TIME=%s will be used for commands in this script only\n' "$SCRIPT_LC_TIME" >&2
-  fi
-fi
-
-# with_locale runs a single command with the chosen LANGUAGE and LC_TIME
-with_locale(){ LANGUAGE="$SCRIPT_LANGUAGE" LC_TIME="$SCRIPT_LC_TIME" "$@"; }
 
 TS="$(date +%Y%m%d_%H%M%S)"
 HOST="$(hostname -f 2>/dev/null || hostname)"
@@ -165,9 +139,6 @@ SED="$(command -v sed || true)"
 MD5="$(command -v md5sum || true)"
 SHA256="$(command -v sha256sum || true)"
 ZCAT="$(command -v zcat || true)"
-NC="$(command -v nc || command -v ncat || true)"
-SOCAT="$(command -v socat || true)"
-XXD="$(command -v xxd || command -v hexdump || true)"
 
 log(){ printf '%b\n' "$*" | sed 's/\r//'; }
 run(){ log ""; log "==== $* ===="; "$@" || true; }
@@ -1182,6 +1153,7 @@ check_upstreams() {
     echo "-- $a (включая ротацию)"
     {
     printf '%s\n' "$files" | while IFS= read -r f; do
+        [ -z "$f" ] && continue
         case "$f" in
           *.gz)
             if [ -n "$ZCAT" ]; then
@@ -1477,7 +1449,153 @@ check_upstreams || true
 } > "$OUT_SUMMARY"
 
 # ==========================
-# README + АРХИВ
+# SECURITY AUDIT
+# ==========================
+if [ "${ENABLE_SECURITY_CHECKS:-1}" = "1" ]; then
+  log "===== Security Audit ====="
+  
+  # SSL/TLS Security Analysis
+  log "===== SSL/TLS Security Analysis ====="
+  
+  # Check SSL protocols
+  if grep -q "ssl_protocols" "$DUMP/nginx_T.txt" 2>/dev/null; then
+    echo "[SECURITY] SSL протоколы:" | tee -a "$OUT_ISSUES"
+    grep "ssl_protocols" "$DUMP/nginx_T.txt" | tee -a "$OUT_ISSUES"
+    
+    # Check for insecure protocols
+    if grep -q "SSLv2\|SSLv3" "$DUMP/nginx_T.txt"; then
+      echo "[SECURITY] ВНИМАНИЕ: Обнаружены устаревшие SSL протоколы (SSLv2/SSLv3)" | tee -a "$OUT_ISSUES"
+    fi
+  else
+    echo "[SECURITY] INFO: ssl_protocols не настроен" | tee -a "$OUT_ISSUES"
+  fi
+  
+  # Check SSL ciphers
+  if grep -q "ssl_ciphers" "$DUMP/nginx_T.txt" 2>/dev/null; then
+    echo "[SECURITY] SSL шифры:" | tee -a "$OUT_ISSUES"
+    grep "ssl_ciphers" "$DUMP/nginx_T.txt" | tee -a "$OUT_ISSUES"
+  fi
+  
+  # Check for security headers
+  log "===== Security Headers Analysis ====="
+  
+  # Check if security headers are configured
+  SECURITY_HEADERS=("add_header X-Frame-Options" "add_header X-Content-Type-Options" "add_header X-XSS-Protection" "add_header Strict-Transport-Security")
+  
+  for header in "${SECURITY_HEADERS[@]}"; do
+    if grep -q "$header" "$DUMP/nginx_T.txt" 2>/dev/null; then
+      echo "[SECURITY] OK: Настроен $header" | tee -a "$OUT_ISSUES"
+    else
+      echo "[SECURITY] ВНИМАНИЕ: Не настроен $header" | tee -a "$OUT_ISSUES"
+    fi
+  done
+  
+  # Check server_tokens
+  if grep -q "server_tokens off" "$DUMP/nginx_T.txt" 2>/dev/null; then
+    echo "[SECURITY] OK: server_tokens отключен" | tee -a "$OUT_ISSUES"
+  else
+    echo "[SECURITY] ВНИМАНИЕ: server_tokens включен (раскрывает версию nginx)" | tee -a "$OUT_ISSUES"
+  fi
+  
+  # Check for sensitive information exposure
+  log "===== Sensitive Information Check ====="
+  
+  # Check for debug information
+  if grep -q "debug_connection\|debug_points" "$DUMP/nginx_T.txt" 2>/dev/null; then
+    echo "[SECURITY] ВНИМАНИЕ: Обнаружены debug настройки" | tee -a "$OUT_ISSUES"
+    grep "debug_connection\|debug_points" "$DUMP/nginx_T.txt" | tee -a "$OUT_ISSUES"
+  fi
+  
+  # Check for error pages that might expose information
+  if grep -q "error_page.*50[0-9]" "$DUMP/nginx_T.txt" 2>/dev/null; then
+    echo "[SECURITY] INFO: Настроены кастомные error pages" | tee -a "$OUT_ISSUES"
+  fi
+  
+  # Check file permissions
+  log "===== File Permissions Check ====="
+  
+  # Check nginx config file permissions
+  if [ -r "/etc/nginx/nginx.conf" ]; then
+    NGINX_CONF_PERMS=$(stat -c "%a" "/etc/nginx/nginx.conf" 2>/dev/null || echo "unknown")
+    if [ "$NGINX_CONF_PERMS" != "644" ] && [ "$NGINX_CONF_PERMS" != "640" ]; then
+      echo "[SECURITY] ВНИМАНИЕ: Небезопасные права на nginx.conf: $NGINX_CONF_PERMS" | tee -a "$OUT_ISSUES"
+    else
+      echo "[SECURITY] OK: Безопасные права на nginx.conf: $NGINX_CONF_PERMS" | tee -a "$OUT_ISSUES"
+    fi
+  fi
+  
+  # Check for world-readable sensitive files
+  find /etc/nginx -type f -perm -o+r 2>/dev/null | while read -r file; do
+    if [ -f "$file" ]; then
+      echo "[SECURITY] ВНИМАНИЕ: Файл доступен для чтения всем: $file" | tee -a "$OUT_ISSUES"
+    fi
+  done
+  
+  # Check for open ports
+  log "===== Open Ports Security Check ====="
+  
+  # Check if nginx is listening on all interfaces
+  if ss -tlnp | grep -q ":80.*nginx\|:443.*nginx"; then
+    echo "[SECURITY] INFO: Nginx слушает на портах 80/443" | tee -a "$OUT_ISSUES"
+    
+    # Check if listening on all interfaces (0.0.0.0)
+    if ss -tlnp | grep -q "0.0.0.0:80\|0.0.0.0:443"; then
+      echo "[SECURITY] ВНИМАНИЕ: Nginx слушает на всех интерфейсах (0.0.0.0)" | tee -a "$OUT_ISSUES"
+    fi
+  fi
+  
+  # Check for unnecessary open ports
+  OPEN_PORTS=$(ss -tlnp | grep -E ":(80|443|8080|8443)" | wc -l)
+  if [ "$OPEN_PORTS" -gt 2 ]; then
+    echo "[SECURITY] ВНИМАНИЕ: Открыто много веб-портов: $OPEN_PORTS" | tee -a "$OUT_ISSUES"
+  fi
+  
+  # Check for SSL certificate issues
+  log "===== SSL Certificate Security Check ====="
+  
+  if [ -s "$OUT_CERTS" ]; then
+    # Check for expired certificates
+    if grep -q "expired\|EXPIRED" "$OUT_CERTS"; then
+      echo "[SECURITY] КРИТИЧНО: Обнаружены истекшие сертификаты" | tee -a "$OUT_ISSUES"
+    fi
+    
+    # Check for self-signed certificates
+    if grep -q "self-signed\|SELF_SIGNED" "$OUT_CERTS"; then
+      echo "[SECURITY] ВНИМАНИЕ: Обнаружены самоподписанные сертификаты" | tee -a "$OUT_ISSUES"
+    fi
+    
+    # Check for weak key sizes
+    if grep -q "1024\|512" "$OUT_CERTS"; then
+      echo "[SECURITY] ВНИМАНИЕ: Обнаружены слабые ключи (< 2048 бит)" | tee -a "$OUT_ISSUES"
+    fi
+  fi
+  
+  # Generate security summary
+  echo "" | tee -a "$OUT_ISSUES"
+  echo "===== Security Summary =====" | tee -a "$OUT_ISSUES"
+  
+  CRITICAL_COUNT=$(grep -c "КРИТИЧНО:" "$OUT_ISSUES" 2>/dev/null || echo "0")
+  WARNING_COUNT=$(grep -c "ВНИМАНИЕ:" "$OUT_ISSUES" 2>/dev/null || echo "0")
+  OK_COUNT=$(grep -c "OK:" "$OUT_ISSUES" 2>/dev/null || echo "0")
+  
+  echo "[SECURITY] Критичных проблем: $CRITICAL_COUNT" | tee -a "$OUT_ISSUES"
+  echo "[SECURITY] Предупреждений: $WARNING_COUNT" | tee -a "$OUT_ISSUES"
+  echo "[SECURITY] OK проверок: $OK_COUNT" | tee -a "$OUT_ISSUES"
+  
+  if [ "$CRITICAL_COUNT" -gt 0 ]; then
+    echo "[SECURITY] РЕКОМЕНДАЦИЯ: Немедленно устраните критические проблемы безопасности" | tee -a "$OUT_ISSUES"
+  fi
+  
+  if [ "$WARNING_COUNT" -gt 0 ]; then
+    echo "[SECURITY] РЕКОМЕНДАЦИЯ: Рассмотрите устранение предупреждений безопасности" | tee -a "$OUT_ISSUES"
+  fi
+  
+  log "Security audit завершен"
+else
+  log "===== Security Audit ====="
+  log "Security проверки отключены (ENABLE_SECURITY_CHECKS=0)"
+fi
+
 # ==========================
 {
   echo "# Nginx audit ($HOST @ $TS)"

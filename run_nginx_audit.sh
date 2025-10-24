@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Wrapper to run collect_nginx.sh in a clean environment to avoid interactive menus
 # Usage: sudo ./run_nginx_audit.sh
 set -euo pipefail
