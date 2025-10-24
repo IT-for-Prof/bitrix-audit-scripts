@@ -1219,16 +1219,19 @@ check_security_tools() {
     # Check yum-plugin-security (RHEL-family only)
     case "$distro_id" in
         "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
-            if command -v yum >/dev/null 2>&1; then
-                if ! rpm -q yum-plugin-security >/dev/null 2>&1; then
+            # Для dnf встроенная поддержка, проверка не нужна
+            if command -v dnf >/dev/null 2>&1; then
+                log "✅ dnf has built-in security updates support"
+            elif command -v yum >/dev/null 2>&1; then
+                # Только для старых систем с yum
+                if rpm -q yum-plugin-security >/dev/null 2>&1; then
+                    log "✅ yum-plugin-security: installed"
+                else
                     log_warning "yum-plugin-security not found - security updates analysis will be limited"
                     log "  Install: yum install yum-plugin-security"
                     echo ""
                     missing=1
                 fi
-            elif command -v dnf >/dev/null 2>&1; then
-                # dnf has built-in updateinfo, no plugin needed
-                log "dnf has built-in security updates support"
             fi
             ;;
     esac
@@ -1504,14 +1507,29 @@ generate_installation_recommendations() {
     echo
     
     echo ""
-    log "=== Quick Auto-Install ==="
-    echo "  Run this script with --install flag to automatically install missing packages:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log "🚀 AUTOMATIC INSTALLATION AVAILABLE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Instead of manual installation, you can run:"
+    echo ""
     echo "  sudo ./check_requirements.sh --install"
     echo ""
-    echo "  Or use dedicated monitoring setup script:"
+    echo "This will automatically:"
+    echo "  • Install all missing packages"
+    echo "  • Configure monitoring tools (sysstat, atop)"
+    echo "  • Apply security updates"
+    echo "  • Verify installation"
+    echo ""
+    echo "For non-interactive installation:"
+    echo "  sudo ./check_requirements.sh --install --non-interactive"
+    echo ""
+    echo "For monitoring tools only:"
     echo "  sudo ./setup_monitoring.sh --non-interactive"
     echo ""
-    log "=== Manual Installation Commands ==="
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log "📋 MANUAL INSTALLATION COMMANDS (if preferred)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     
     case "$distro" in
@@ -1707,6 +1725,9 @@ main() {
         exit 0
     else
         log "❌ Some requirements are missing. See recommendations above."
+        echo ""
+        log "💡 Quick fix: Run automatic installation:"
+        log "   sudo ./check_requirements.sh --install"
         exit 1
     fi
 }
