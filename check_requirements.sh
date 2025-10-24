@@ -2469,6 +2469,9 @@ generate_installation_recommendations() {
 
 # Main execution
 main() {
+    # Update command hash cache to ensure newly installed commands are found
+    hash -r 2>/dev/null || true
+    
     # Detect distribution and package manager
     detect_distro
     
