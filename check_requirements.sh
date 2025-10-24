@@ -68,18 +68,23 @@ track_package_install() {
     local status="$2"
     local version="$3"
     
+    if [ "$VERBOSE" = "1" ]; then
+        log_verbose "DEBUG: track_package_install called with: $package, $status, $version"
+    fi
+    
     INSTALLED_PACKAGES["$package"]="$version"
     INSTALL_STATUS["$package"]="$status"
     
     case "$status" in
-        "installed") ((INSTALL_COUNTERS[0]++)) ;;
-        "upgraded") ((INSTALL_COUNTERS[1]++)) ;;
-        "skipped") ((INSTALL_COUNTERS[2]++)) ;;
-        "failed") ((INSTALL_COUNTERS[3]++)) ;;
+        "installed") ((INSTALL_COUNTERS[0]++)) || true ;;
+        "upgraded") ((INSTALL_COUNTERS[1]++)) || true ;;
+        "skipped") ((INSTALL_COUNTERS[2]++)) || true ;;
+        "failed") ((INSTALL_COUNTERS[3]++)) || true ;;
     esac
     
     if [ "$VERBOSE" = "1" ]; then
         log_verbose "Tracking: $package -> $status ($version)"
+        log_verbose "DEBUG: track_package_install completed successfully"
     fi
 }
 
@@ -371,6 +376,10 @@ auto_install_packages() {
         fi
     fi
     
+    if [ "$VERBOSE" = "1" ]; then
+        log_verbose "DEBUG: EPEL block completed, moving to main packages"
+    fi
+    
     # Установка основных пакетов
     log_info "Installing main packages..."
     
@@ -384,10 +393,14 @@ auto_install_packages() {
                 log_verbose "Packages to install: $packages_rhel"
                 ;;
         esac
+        log_verbose "DEBUG: About to start case statement for $distro_id"
     fi
     
     case "$distro_id" in
         "ubuntu"|"debian")
+            if [ "$VERBOSE" = "1" ]; then
+                log_verbose "DEBUG: Entering Ubuntu/Debian branch"
+            fi
             log_info "Updating package lists..."
             apt-get update
             
@@ -409,6 +422,9 @@ auto_install_packages() {
             fi
             ;;
         "almalinux"|"rocky"|"centos"|"rhel"|"fedora")
+            if [ "$VERBOSE" = "1" ]; then
+                log_verbose "DEBUG: Entering RHEL-family branch"
+            fi
             log_info "Installing packages: $packages_rhel"
             if $pkg_manager install -y $packages_rhel; then
                 log_success "Main packages installed successfully"
