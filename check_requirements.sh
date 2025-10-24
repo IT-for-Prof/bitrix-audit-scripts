@@ -263,6 +263,12 @@ check_package_vulnerabilities() {
             local security_updates=0
             if $pkg_manager updateinfo list security >/dev/null 2>&1; then
                 security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -cE "^(Critical|Important)" || echo "0")
+                # Clean up the variable - remove any whitespace/newlines
+                security_updates=$(echo "$security_updates" | tr -d '\n\r ' | grep -o '[0-9]*' | head -n1)
+                # Ensure we have a valid number
+                if [ -z "$security_updates" ] || ! [[ "$security_updates" =~ ^[0-9]+$ ]]; then
+                    security_updates=0
+                fi
                 
                 if [ "$security_updates" -gt 0 ]; then
                     log_warning "Found $security_updates critical/important security updates"
@@ -274,6 +280,11 @@ check_package_vulnerabilities() {
                 # Additional check for all security updates
                 local all_security_updates
                 all_security_updates=$($pkg_manager updateinfo list security 2>/dev/null | grep -c "^[A-Z]" || echo "0")
+                # Clean up the variable
+                all_security_updates=$(echo "$all_security_updates" | tr -d '\n\r ' | grep -o '[0-9]*' | head -n1)
+                if [ -z "$all_security_updates" ] || ! [[ "$all_security_updates" =~ ^[0-9]+$ ]]; then
+                    all_security_updates=0
+                fi
                 if [ "$all_security_updates" -gt 0 ]; then
                     log_info "Total security updates available: $all_security_updates"
                 fi
@@ -752,7 +763,7 @@ log() {
 
 log_verbose() {
     if [ "$VERBOSE" = "1" ]; then
-        echo "VERBOSE: $*"
+        echo "VERBOSE: $*" >&2
     fi
 }
 
