@@ -1110,7 +1110,7 @@ enable_services() {
 verify_setup() {
     log_info "Verifying setup..."
     
-    local all_good=1
+    local all_good=0
     local services=("sysstat" "atop")
     local critical_issues=0
     local warnings=0
@@ -1149,7 +1149,7 @@ verify_setup() {
                         log_error "$service configuration issues detected:"
                         echo -e "$issues"
                         critical_issues=$((critical_issues + 1))
-                        all_good=0
+                        all_good=1
                     elif echo "$warnings_text" | grep -q "⚠"; then
                         log_warning "$service configuration warnings:"
                         echo -e "$warnings_text"
@@ -1171,28 +1171,28 @@ verify_setup() {
                     log_error "$service data collection problems:"
                     echo -e "$data_status"
                     critical_issues=$((critical_issues + 1))
-                    all_good=0
+                    all_good=1
                 fi
                 ;;
             "inactive")
                 log_warning "$service is installed but not started ($description)"
                 warnings=$((warnings + 1))
-                all_good=0
+                all_good=1
                 ;;
             "failed")
                 log_error "$service failed to start ($description)"
                 critical_issues=$((critical_issues + 1))
-                all_good=0
+                all_good=1
                 ;;
             "unknown")
                 log_error "$service status unknown ($description)"
                 critical_issues=$((critical_issues + 1))
-                all_good=0
+                all_good=1
                 ;;
             "not-found")
                 log_error "$service not found ($description)"
                 critical_issues=$((critical_issues + 1))
-                all_good=0
+                all_good=1
                 ;;
         esac
     done
@@ -1209,7 +1209,7 @@ verify_setup() {
         else
             log_error "$cmd command is not available"
             missing_commands=$((missing_commands + 1))
-            all_good=0
+            all_good=1
         fi
     done
     
