@@ -34,6 +34,7 @@
 
 ```bash
 ./run_all_audits.sh --nginx --mysql --php
+./run_all_audits.sh --security  # Новый модуль аудита безопасности
 ```
 
 ## Требования к системе
@@ -55,6 +56,7 @@
 - **system**: systemctl, journalctl, iostat, vmstat, lsof, ss, ethtool, smartctl, findmnt, numactl, chronyc/ntpq, slabtop
 - **atop**: atop, atopsar
 - **sar**: sar, sadf (пакет sysstat)
+- **security**: lynis, auditctl, ausearch, getenforce, aa-status, fail2ban-client
 
 ### Системные требования
 
@@ -190,6 +192,7 @@ Audit-Bitrix24/
 ├── collect_atop.sh               # Сбор данных atop
 ├── collect_sar.sh                # Сбор данных sar
 ├── collect_cron.sh               # Сбор данных cron
+├── collect_security.sh           # Аудит безопасности системы
 ├── analyze_nginx_errors.sh       # Анализ логов ошибок nginx
 ├── analyze_apache_errors.sh      # Анализ логов ошибок apache
 ├── analyze_and_recommend.sh      # Анализ и генерация рекомендаций
@@ -245,6 +248,7 @@ Audit-Bitrix24/
 - `--redis` - запуск только redis аудита
 - `--bitrix` - запуск только аудита Битрикс (кеш, настройки)
 - `--system` - запуск только системного аудита
+- `--security` - запуск только аудита безопасности
 - `--atop` - запуск только atop аудита
 - `--sar` - запуск только sar аудита
 - `--cron` - запуск только cron аудита
@@ -303,6 +307,28 @@ Audit-Bitrix24/
 # Подробный вывод
 ./collect_bitrix.sh --verbose
 ```
+
+### Аудит безопасности
+
+```bash
+# Полный аудит безопасности
+sudo ./collect_security.sh
+
+# Аудит с кастомными настройками
+SECURITY_CHECK_LYNIS=0 SECURITY_AUTH_LOG_DAYS=60 sudo ./collect_security.sh
+```
+
+**Анализируемые компоненты:**
+- Пользователи и аутентификация (/etc/passwd, /etc/shadow, /etc/group)
+- Sudo конфигурация (/etc/sudoers, /etc/sudoers.d/*)
+- SSH безопасность (sshd_config, SSH-ключи пользователей)
+- Файловые права (SUID/SGID, world-writable, orphaned files)
+- SELinux/AppArmor статус и конфигурация
+- Auditd система аудита Linux
+- Journald критичные события
+- Kernel параметры безопасности
+- Lynis интеграция (если установлен)
+- Пакеты безопасности
 
 ### Системный аудит
 

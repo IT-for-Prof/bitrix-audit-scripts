@@ -14,6 +14,7 @@ ENABLE_SAR=1           # Will be automatically skipped if sysstat not installed
 ENABLE_CRON=1
 ENABLE_ERROR_ANALYSIS=1
 ENABLE_BITRIX=1
+ENABLE_SECURITY=1
 
 # ===== GENERAL SETTINGS =====
 # Audit directory (default: /root/audit)
@@ -122,6 +123,17 @@ BITRIX_CACHE_DISK_PCT_CRITICAL=20   # Critical disk usage percentage
 BITRIX_ANALYZE_UPLOAD=1             # 1=analyze upload directories, 0=skip
 BITRIX_INCLUDE_FILE_TYPES=1         # 1=analyze file types, 0=skip
 BITRIX_MAX_FILES_PER_DIR=10000      # Maximum files to analyze per directory
+
+# ===== SECURITY AUDIT SETTINGS =====
+# Security audit configuration
+SECURITY_CHECK_SUID=1               # Check SUID/SGID files
+SECURITY_CHECK_WORLD_WRITABLE=1     # Check world-writable files
+SECURITY_SCAN_HOME_DIRS=1           # Scan user home directories for SSH keys
+SECURITY_ANALYZE_AUTH_LOGS=1        # Analyze authentication logs
+SECURITY_AUTH_LOG_DAYS=30           # Days of auth logs to analyze
+SECURITY_CHECK_LYNIS=1              # Run Lynis audit if available
+SECURITY_CHECK_AUDITD=1             # Analyze auditd configuration
+SECURITY_CHECK_SELINUX=1            # Analyze SELinux/AppArmor status
 
 # ===== DEBUGGING =====
 # Debug mode (enables verbose output)

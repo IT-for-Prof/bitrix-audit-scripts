@@ -132,6 +132,11 @@ collect_audit_data() {
         data+=("redis:${INPUT_DIR}/redis_audit/out/recommendations.txt")
     fi
     
+    # Security audit
+    if [ -f "${INPUT_DIR}/security_audit/SUMMARY_security.txt" ]; then
+        data+=("security:${INPUT_DIR}/security_audit/SUMMARY_security.txt")
+    fi
+    
     # Analysis results
     if [ -f "${INPUT_DIR}/analysis/recommendations.txt" ]; then
         data+=("analysis:${INPUT_DIR}/analysis/recommendations.txt")
@@ -324,6 +329,37 @@ EOF
         echo "" >> "$output_file"
     fi
     
+    # Add Security information
+    if [ -f "${INPUT_DIR}/security_audit/SUMMARY_security.txt" ]; then
+        cat >> "$output_file" << EOF
+## Аудит безопасности
+
+EOF
+        echo "### Сводка безопасности" >> "$output_file"
+        echo '```' >> "$output_file"
+        cat "${INPUT_DIR}/security_audit/SUMMARY_security.txt" >> "$output_file"
+        echo '```' >> "$output_file"
+        echo "" >> "$output_file"
+        
+        # Add security issues if available
+        if [ -f "${INPUT_DIR}/security_audit/17_security_issues.txt" ]; then
+            echo "### Обнаруженные проблемы" >> "$output_file"
+            echo '```' >> "$output_file"
+            head -20 "${INPUT_DIR}/security_audit/17_security_issues.txt" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
+        fi
+        
+        # Add security recommendations if available
+        if [ -f "${INPUT_DIR}/security_audit/18_security_recommendations.txt" ]; then
+            echo "### Рекомендации по безопасности" >> "$output_file"
+            echo '```' >> "$output_file"
+            head -20 "${INPUT_DIR}/security_audit/18_security_recommendations.txt" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
+        fi
+    fi
+    
     # Add recommendations
     if [ -f "${INPUT_DIR}/analysis/recommendations.txt" ]; then
         cat >> "$output_file" << EOF
@@ -408,6 +444,10 @@ EOF
     
     if [ -f "${INPUT_DIR}/redis_audit/out/recommendations.txt" ]; then
         components+=('    "redis": "available"')
+    fi
+    
+    if [ -f "${INPUT_DIR}/security_audit/SUMMARY_security.txt" ]; then
+        components+=('    "security": "available"')
     fi
     
     if [ ${#components[@]} -gt 0 ]; then
@@ -666,6 +706,46 @@ EOF
         cat >> "$output_file" << EOF
         </pre>
 EOF
+    fi
+    
+    # Add Security information
+    if [ -f "${INPUT_DIR}/security_audit/SUMMARY_security.txt" ]; then
+        cat >> "$output_file" << EOF
+        
+        <h2 id="security">Аудит безопасности</h2>
+        <h3>Сводка безопасности</h3>
+        <pre>
+EOF
+        cat "${INPUT_DIR}/security_audit/SUMMARY_security.txt" >> "$output_file"
+        cat >> "$output_file" << EOF
+        </pre>
+EOF
+        
+        # Add security issues if available
+        if [ -f "${INPUT_DIR}/security_audit/17_security_issues.txt" ]; then
+            cat >> "$output_file" << EOF
+        
+        <h3>Обнаруженные проблемы</h3>
+        <pre>
+EOF
+            head -20 "${INPUT_DIR}/security_audit/17_security_issues.txt" >> "$output_file"
+            cat >> "$output_file" << EOF
+        </pre>
+EOF
+        fi
+        
+        # Add security recommendations if available
+        if [ -f "${INPUT_DIR}/security_audit/18_security_recommendations.txt" ]; then
+            cat >> "$output_file" << EOF
+        
+        <h3>Рекомендации по безопасности</h3>
+        <pre>
+EOF
+            head -20 "${INPUT_DIR}/security_audit/18_security_recommendations.txt" >> "$output_file"
+            cat >> "$output_file" << EOF
+        </pre>
+EOF
+        fi
     fi
     
     # Add recommendations

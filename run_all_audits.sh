@@ -69,6 +69,7 @@ ENABLE_SAR=1
 ENABLE_CRON=1
 ENABLE_ERROR_ANALYSIS=1
 ENABLE_BITRIX=1
+ENABLE_SECURITY=1
 
 # Execution mode
 PARALLEL_EXECUTION=0
@@ -137,6 +138,7 @@ is_module_enabled() {
         cron) [ "${ENABLE_CRON:-1}" = "1" ] ;;
         analyze-errors) [ "${ENABLE_ERROR_ANALYSIS:-1}" = "1" ] ;;
         bitrix) [ "${ENABLE_BITRIX:-1}" = "1" ] ;;
+        security) [ "${ENABLE_SECURITY:-1}" = "1" ] ;;
         *) return 1 ;;
     esac
 }
@@ -191,6 +193,12 @@ check_module_requirements() {
             if [ ! -d "/home/bitrix" ]; then
                 log_warning "/home/bitrix directory not found, skipping bitrix audit"
                 return 1
+            fi
+            ;;
+        security)
+            # Security module doesn't require specific packages, but benefits from root
+            if [ "$EUID" -ne 0 ]; then
+                log_warning "Security audit will be limited without root privileges"
             fi
             ;;
     esac
@@ -255,6 +263,9 @@ run_audit_module() {
         bitrix)
             bash "$SCRIPT_DIR/collect_bitrix.sh" 2>&1 | tee -a "$LOG_FILE"
             ;;
+        security)
+            bash "$SCRIPT_DIR/collect_security.sh" 2>&1 | tee -a "$LOG_FILE"
+            ;;
         *)
             log_error "Unknown module: $module"
             return 1
@@ -278,7 +289,7 @@ run_audit_module() {
 
 # Run all enabled modules
 run_all_modules() {
-    local modules=("nginx" "apache" "mysql" "php" "redis" "system" "atop" "sar" "cron" "analyze-errors" "bitrix")
+    local modules=("nginx" "apache" "mysql" "php" "redis" "system" "atop" "sar" "cron" "analyze-errors" "bitrix" "security")
     local failed_modules=()
     local total_start_time total_end_time total_duration
     
