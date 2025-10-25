@@ -140,7 +140,8 @@ log_verbose() {
 }
 
 log_error() {
-    echo "ERROR: $*" >&2
+    echo -e "${RED}✗ $*${NC}" >&2
+    log_to_file "ERROR: $*"
 }
 
 log_warning() {
@@ -153,6 +154,12 @@ log_success() {
 
 log_info() {
     echo "ℹ️  $*"
+}
+
+# Log to file function
+log_to_file() {
+    local log_file="/var/log/bitrix-monitoring-setup.log"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$log_file" 2>/dev/null || true
 }
 
 # Detect Linux distribution
@@ -202,6 +209,35 @@ detect_distro() {
     log_verbose "DEBUG: detect_distro completed successfully"
 }
 
+# Check internet connectivity
+check_internet() {
+    log_info "Checking internet connectivity..."
+    if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || \
+       ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+        log_success "Internet connection: OK"
+        return 0
+    else
+        log_warning "No internet connection detected"
+        return 1
+    fi
+}
+
+# Check available disk space
+check_disk_space() {
+    local required_mb=500
+    local available_mb
+    available_mb=$(df /var/log | tail -1 | awk '{print int($4/1024)}')
+    
+    log_info "Checking disk space..."
+    if [ "$available_mb" -lt "$required_mb" ]; then
+        log_warning "Low disk space: ${available_mb}MB available, ${required_mb}MB recommended"
+        return 1
+    else
+        log_success "Disk space: ${available_mb}MB available"
+        return 0
+    fi
+}
+
 # Create backup of file with timestamp
 backup_file() {
     local file="$1"
@@ -247,7 +283,8 @@ get_service_status() {
         # Special handling for timer-based services
         if [ "$status" = "inactive" ] || [ "$status" = "unknown" ]; then
             # Check if service uses timers (common in modern distributions)
-            local timers=$(get_service_timers "$service_name")
+            local timers
+            timers=$(get_service_timers "$service_name")
             if [ -n "$timers" ]; then
                 local timer_active=false
                 for timer in $timers; do
@@ -328,7 +365,8 @@ get_service_timers() {
 # Check and enable systemd timers for a service
 check_and_enable_timers() {
     local service_name="$1"
-    local timers=$(get_service_timers "$service_name")
+    local timers
+    timers=$(get_service_timers "$service_name")
     local enabled_count=0
     
     if [ -z "$timers" ]; then
@@ -419,7 +457,7 @@ get_service_runtime_params() {
     
     if [ -n "$pid" ] && [ "$pid" != "0" ]; then
         # Get command line
-        cmdline=$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' || echo "")
+        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo "")
         
         # Get environment variables
         env_vars=$(systemctl show "$service_name" --property=Environment --value 2>/dev/null || echo "")
@@ -471,7 +509,8 @@ compare_config_with_expected() {
             fi
             
             # Check HISTORY
-            local history=$(echo "$current_config" | grep -o 'HISTORY=[0-9]*' | tail -1 | cut -d= -f2)
+            local history
+            history=$(echo "$current_config" | grep -o 'HISTORY=[0-9]*' | tail -1 | cut -d= -f2)
             if [ -n "$history" ]; then
                 if [ "$history" -ge 7 ]; then
                     issues="${issues}✓ HISTORY=$history (>=7 days)\n"
@@ -485,7 +524,8 @@ compare_config_with_expected() {
             fi
             
             # Check SADC_OPTIONS
-            local sadc_opts=$(echo "$current_config" | grep -o 'SADC_OPTIONS=.*' | cut -d'"' -f2)
+            local sadc_opts
+            sadc_opts=$(echo "$current_config" | grep -o 'SADC_OPTIONS=.*' | cut -d'"' -f2)
             if echo "$sadc_opts" | grep -qE "XALL|ALL"; then
                 issues="${issues}✓ SADC_OPTIONS: $sadc_opts (collecting all metrics)\n"
             else
@@ -493,7 +533,8 @@ compare_config_with_expected() {
             fi
             
             # Check collection interval
-            local interval=$(check_collection_interval "sysstat")
+            local interval
+            interval=$(check_collection_interval "sysstat")
             if [ "$interval" -le 60 ]; then
                 issues="${issues}✓ Collection interval: ${interval}s (optimal)\n"
             elif [ "$interval" -le 300 ]; then
@@ -512,7 +553,8 @@ compare_config_with_expected() {
             fi
             
             # Check LOGINTERVAL
-            local interval=$(echo "$current_config" | grep -o 'LOGINTERVAL=[0-9]*' | tail -1 | cut -d= -f2)
+            local interval
+            interval=$(echo "$current_config" | grep -o 'LOGINTERVAL=[0-9]*' | tail -1 | cut -d= -f2)
             if [ -n "$interval" ]; then
                 if [ "$interval" -le 30 ]; then
                     issues="${issues}✓ LOGINTERVAL=$interval (<=30s)\n"
@@ -526,7 +568,8 @@ compare_config_with_expected() {
             fi
             
             # Check LOGSAVINGS
-            local savings=$(echo "$current_config" | grep -o 'LOGSAVINGS=[0-9]*' | tail -1 | cut -d= -f2)
+            local savings
+            savings=$(echo "$current_config" | grep -o 'LOGSAVINGS=[0-9]*' | tail -1 | cut -d= -f2)
             if [ -n "$savings" ]; then
                 if [ "$savings" -ge 7 ]; then
                     issues="${issues}✓ LOGSAVINGS=$savings (>=7 days)\n"
@@ -540,7 +583,8 @@ compare_config_with_expected() {
             fi
             
             # Check LOGOPTS (should be empty or contain useful options)
-            local logopts=$(echo "$current_config" | grep -o 'LOGOPTS=.*' | cut -d'"' -f2)
+            local logopts
+            logopts=$(echo "$current_config" | grep -o 'LOGOPTS=.*' | cut -d'"' -f2)
             if [ -z "$logopts" ]; then
                 issues="${issues}✓ LOGOPTS: (default - all metrics)\n"
             else
@@ -585,7 +629,7 @@ check_service_data_collection() {
     
     if [ -d "$data_dir" ]; then
         # Find latest file
-        latest_file=$(ls -t "$data_dir" 2>/dev/null | head -n1)
+        latest_file=$(find "$data_dir" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
         
         if [ -n "$latest_file" ]; then
             # Get file age in minutes
@@ -634,19 +678,26 @@ diagnose_service_comprehensive() {
     
     # Get service status
     status_info=$(get_service_status "$service_name")
-    local status=$(echo "$status_info" | cut -d'|' -f1)
-    local description=$(echo "$status_info" | cut -d'|' -f2)
+    local status
+    status=$(echo "$status_info" | cut -d'|' -f1)
+    local description
+    description=$(echo "$status_info" | cut -d'|' -f2)
     
     # Get configuration
     config_info=$(get_service_config "$service_name")
-    local config_file=$(echo "$config_info" | cut -d'|' -f1)
-    local config_data=$(echo "$config_info" | cut -d'|' -f2)
+    local config_file
+    config_file=$(echo "$config_info" | cut -d'|' -f1)
+    local config_data
+    config_data=$(echo "$config_info" | cut -d'|' -f2)
     
     # Get runtime parameters
     runtime_info=$(get_service_runtime_params "$service_name")
-    local pid=$(echo "$runtime_info" | cut -d'|' -f1)
-    local cmdline=$(echo "$runtime_info" | cut -d'|' -f2)
-    local env_vars=$(echo "$runtime_info" | cut -d'|' -f3)
+    local pid
+    pid=$(echo "$runtime_info" | cut -d'|' -f1)
+    local cmdline
+    cmdline=$(echo "$runtime_info" | cut -d'|' -f2)
+    local env_vars
+    env_vars=$(echo "$runtime_info" | cut -d'|' -f3)
     
     # Get expected configuration
     expected_config=$(get_expected_config "$service_name")
@@ -708,11 +759,6 @@ diagnose_service_comprehensive() {
     echo "Service: $service_name"
     echo "Overall Status: $overall_status"
     echo "Service Status: $status ($description)"
-    echo "Config File: $config_file"
-    if [ -n "$config_data" ] && [ "$config_file" != "systemd" ]; then
-        echo ""
-        echo "$config_data"
-    fi
     
     # Show how service is started
     case "$status" in
@@ -836,6 +882,11 @@ generate_service_report() {
 
 # Install packages based on distribution
 install_packages() {
+    if ! check_internet; then
+        log_error "Internet connection required for package installation"
+        return 1
+    fi
+    
     log_info "Installing monitoring packages..."
     
     case "$PACKAGE_MANAGER" in
@@ -1214,7 +1265,8 @@ verify_metrics_collection() {
     case "$service_name" in
         "sysstat")
             # Check latest sa file
-            local latest_sa=$(ls -t /var/log/sa/sa[0-9][0-9] 2>/dev/null | head -1)
+            local latest_sa
+            latest_sa=$(find /var/log/sa -name "sa[0-9][0-9]" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
             if [ -n "$latest_sa" ]; then
                 # Check for various metrics
                 local has_cpu=$(sar -u -f "$latest_sa" 2>/dev/null | grep -c "Average")
@@ -1231,7 +1283,8 @@ verify_metrics_collection() {
             ;;
         "atop")
             # Check latest atop file
-            local latest_atop=$(ls -t /var/log/atop/atop_* 2>/dev/null | head -1)
+            local latest_atop
+            latest_atop=$(find /var/log/atop -name "atop_*" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
             if [ -n "$latest_atop" ]; then
                 local has_sections=$(atop -r "$latest_atop" -P CPU,MEM,DSK,NET 2>/dev/null | grep -c "^CPU\|^MEM\|^DSK\|^NET")
                 
@@ -2037,10 +2090,25 @@ main() {
     
     # Handle diagnostic modes
     if [ "$DIAGNOSE_ONLY" = "1" ]; then
+        local diag_log="/var/log/bitrix-monitoring-diag-$(date +%Y%m%d-%H%M%S).log"
+        
         echo "================================================"
         echo "COMPREHENSIVE SERVICE DIAGNOSTICS"
         echo "================================================"
         echo ""
+        
+        # Start logging to file
+        {
+            echo "Bitrix24 Monitoring Setup v$VERSION"
+            echo "Diagnostic report generated: $(date)"
+            echo "Distribution: $DISTRO_ID $DISTRO_VERSION"
+            echo "Package manager: $PACKAGE_MANAGER"
+            echo ""
+            echo "================================================"
+            echo "COMPREHENSIVE SERVICE DIAGNOSTICS"
+            echo "================================================"
+            echo ""
+        } > "$diag_log"
         
         local services=("sysstat" "atop")
         local process_accounting_service=""
@@ -2060,7 +2128,7 @@ main() {
         fi
         
         for service in "${services[@]}"; do
-            generate_service_report "$service"
+            generate_service_report "$service" | tee -a "$diag_log"
         done
         
         echo "================================================"
@@ -2071,6 +2139,8 @@ main() {
         echo "  • Review recommendations above"
         echo "  • Run setup with --force to apply fixes"
         echo "  • Use --check-only for quick status updates"
+        echo ""
+        echo "Diagnostic report saved to: $diag_log"
         echo ""
         exit 0
     fi
@@ -2157,6 +2227,11 @@ main() {
     echo ""
     log_info "Starting monitoring tools setup..."
     echo ""
+    
+    # Check prerequisites
+    if ! check_disk_space; then
+        log_warning "Continuing despite low disk space..."
+    fi
     
     # Install packages
     install_packages
