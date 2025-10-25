@@ -141,7 +141,6 @@ log_verbose() {
 
 log_error() {
     echo -e "${RED}✗ $*${NC}" >&2
-    log_to_file "ERROR: $*"
 }
 
 log_warning() {
@@ -154,12 +153,6 @@ log_success() {
 
 log_info() {
     echo "ℹ️  $*"
-}
-
-# Log to file function
-log_to_file() {
-    local log_file="/var/log/bitrix-monitoring-setup.log"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$log_file" 2>/dev/null || true
 }
 
 # Detect Linux distribution
