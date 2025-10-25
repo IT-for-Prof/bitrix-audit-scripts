@@ -2083,25 +2083,10 @@ main() {
     
     # Handle diagnostic modes
     if [ "$DIAGNOSE_ONLY" = "1" ]; then
-        local diag_log="/var/log/bitrix-monitoring-diag-$(date +%Y%m%d-%H%M%S).log"
-        
         echo "================================================"
         echo "COMPREHENSIVE SERVICE DIAGNOSTICS"
         echo "================================================"
         echo ""
-        
-        # Start logging to file
-        {
-            echo "Bitrix24 Monitoring Setup v$VERSION"
-            echo "Diagnostic report generated: $(date)"
-            echo "Distribution: $DISTRO_ID $DISTRO_VERSION"
-            echo "Package manager: $PACKAGE_MANAGER"
-            echo ""
-            echo "================================================"
-            echo "COMPREHENSIVE SERVICE DIAGNOSTICS"
-            echo "================================================"
-            echo ""
-        } > "$diag_log"
         
         local services=("sysstat" "atop")
         local process_accounting_service=""
@@ -2121,7 +2106,7 @@ main() {
         fi
         
         for service in "${services[@]}"; do
-            generate_service_report "$service" | tee -a "$diag_log"
+            generate_service_report "$service"
         done
         
         echo "================================================"
@@ -2132,8 +2117,6 @@ main() {
         echo "  • Review recommendations above"
         echo "  • Run setup with --force to apply fixes"
         echo "  • Use --check-only for quick status updates"
-        echo ""
-        echo "Diagnostic report saved to: $diag_log"
         echo ""
         exit 0
     fi
