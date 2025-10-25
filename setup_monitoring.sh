@@ -798,7 +798,7 @@ diagnose_service_comprehensive() {
     # Log Rotation Status
     echo ""
     echo "Log Rotation Status:"
-    check_log_rotation "$service_name" | sed 's/^/  /'
+    check_log_rotation "$service_name"
     
     # Metrics Verification
     echo ""
@@ -1035,6 +1035,146 @@ check_collection_interval() {
     echo "$interval"
 }
 
+# Check rotation mechanism for monitoring services
+check_rotation_mechanism() {
+    local service_name="$1"
+    
+    case "$service_name" in
+        "sysstat")
+            # Проверить cron
+            if [ -f /etc/cron.d/sysstat ] && grep -q "sa2" /etc/cron.d/sysstat; then
+                echo "  ✓ Cron job: /etc/cron.d/sysstat (sa2)"
+            fi
+            # Проверить systemd timer
+            if systemctl list-unit-files 2>/dev/null | grep -q "sysstat-summary.timer"; then
+                echo "  ✓ Systemd timer: sysstat-summary.timer"
+            fi
+            ;;
+        "atop")
+            # Проверить systemd timer
+            if systemctl list-unit-files 2>/dev/null | grep -q "atop-rotate.timer"; then
+                echo "  ✓ Systemd timer: atop-rotate.timer"
+            fi
+            # Проверить cron
+            if [ -f /etc/cron.daily/atop ]; then
+                echo "  ✓ Cron job: /etc/cron.daily/atop"
+            fi
+            ;;
+        "psacct")
+            if [ -f /etc/logrotate.d/psacct ]; then
+                echo "  ✓ Logrotate config: /etc/logrotate.d/psacct"
+            fi
+            ;;
+    esac
+}
+
+# Check rotation status for monitoring services
+check_rotation_status() {
+    local service_name="$1"
+    
+    case "$service_name" in
+        "sysstat")
+            # Проверить systemd timer
+            if systemctl list-unit-files 2>/dev/null | grep -q "sysstat-summary.timer"; then
+                if systemctl is-enabled sysstat-summary.timer >/dev/null 2>&1; then
+                    echo "  ✓ sysstat-summary.timer: enabled"
+                else
+                    echo "  ✗ sysstat-summary.timer: disabled"
+                fi
+                if systemctl is-active sysstat-summary.timer >/dev/null 2>&1; then
+                    echo "  ✓ sysstat-summary.timer: active"
+                else
+                    echo "  ✗ sysstat-summary.timer: inactive"
+                fi
+            fi
+            # Проверить cron daemon
+            if systemctl is-active crond >/dev/null 2>&1 || systemctl is-active cron >/dev/null 2>&1; then
+                echo "  ✓ Cron daemon: running"
+            fi
+            ;;
+        "atop")
+            if systemctl list-unit-files 2>/dev/null | grep -q "atop-rotate.timer"; then
+                if systemctl is-enabled atop-rotate.timer >/dev/null 2>&1; then
+                    echo "  ✓ atop-rotate.timer: enabled"
+                else
+                    echo "  ✗ atop-rotate.timer: disabled"
+                fi
+                if systemctl is-active atop-rotate.timer >/dev/null 2>&1; then
+                    echo "  ✓ atop-rotate.timer: active"
+                else
+                    echo "  ✗ atop-rotate.timer: inactive"
+                fi
+            fi
+            ;;
+        "psacct")
+            if [ -f /etc/cron.daily/logrotate ]; then
+                echo "  ✓ Logrotate cron job exists"
+            fi
+            if systemctl is-active crond >/dev/null 2>&1 || systemctl is-active cron >/dev/null 2>&1; then
+                echo "  ✓ Cron daemon: running"
+            fi
+            ;;
+    esac
+}
+
+# Check rotation settings for monitoring services
+check_rotation_settings() {
+    local service_name="$1"
+    local retention_days="$2"
+    
+    case "$service_name" in
+        "sysstat")
+            echo "  ℹ Retention period: $retention_days days (HISTORY)"
+            ;;
+        "atop")
+            echo "  ℹ Retention period: $retention_days days (LOGSAVINGS)"
+            ;;
+        "psacct")
+            if [ -f /etc/logrotate.d/psacct ]; then
+                local rotate=$(grep "^[[:space:]]*rotate" /etc/logrotate.d/psacct | awk '{print $2}')
+                [ -n "$rotate" ] && echo "  ℹ Keeps $rotate old files (logrotate)"
+            fi
+            ;;
+    esac
+}
+
+# Check rotation results for monitoring services
+check_rotation_results() {
+    local log_dir="$1"
+    local file_pattern="$2"
+    local retention_days="$3"
+    
+    if [ ! -d "$log_dir" ]; then
+        echo "  ✗ Log directory not found: $log_dir"
+        return 1
+    fi
+    
+    # Count files
+    local file_count=$(find "$log_dir" -name "$file_pattern" -type f 2>/dev/null | wc -l)
+    echo "  ℹ Total log files: $file_count"
+    
+    # Check old files
+    if [ "$retention_days" -gt 0 ]; then
+        local old_files=$(find "$log_dir" -name "$file_pattern" -type f -mtime +$retention_days 2>/dev/null | wc -l)
+        if [ "$old_files" -eq 0 ]; then
+            echo "  ✓ No files older than $retention_days days"
+        else
+            echo "  ⚠ Found $old_files file(s) older than $retention_days days"
+        fi
+    fi
+    
+    # Oldest file
+    local oldest_file=$(find "$log_dir" -name "$file_pattern" -type f -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | awk '{print $2}')
+    if [ -n "$oldest_file" ]; then
+        local oldest_days=$(( ($(date +%s) - $(stat -c %Y "$oldest_file" 2>/dev/null || echo 0)) / 86400 ))
+        echo "  ℹ Oldest file: $(basename "$oldest_file") ($oldest_days days old)"
+    fi
+    
+    # Total size
+    local total_size=$(du -sh "$log_dir" 2>/dev/null | awk '{print $1}')
+    echo "  ℹ Total size: $total_size"
+}
+
 # Check log rotation status for monitoring services
 check_log_rotation() {
     local service_name="$1"
@@ -1050,8 +1190,7 @@ check_log_rotation() {
             ;;
         "atop")
             log_dir="/var/log/atop"
-            retention_days=$(grep "^LOGSAVINGS=" /etc/sysconfig/atop /etc/default/atop 2>/dev/null | cut -d= -f2 | head -1)
-            [ -z "$retention_days" ] && retention_days=7
+            retention_days=7
             file_pattern="atop_[0-9]*"
             ;;
         "psacct")
@@ -1060,41 +1199,24 @@ check_log_rotation() {
             ;;
     esac
     
-    if [ ! -d "$log_dir" ]; then
-        echo "✗ Log directory not found: $log_dir"
-        return 1
-    fi
+    # 1. Проверка наличия механизма ротации
+    echo "Rotation Mechanism:"
+    check_rotation_mechanism "$service_name"
     
-    # Count files
-    local file_count=$(find "$log_dir" -name "$file_pattern" -type f 2>/dev/null | wc -l)
+    # 2. Проверка активности механизма
+    echo ""
+    echo "Rotation Status:"
+    check_rotation_status "$service_name"
     
-    # Check old files
-    local old_files=0
-    if [ "$retention_days" -gt 0 ]; then
-        old_files=$(find "$log_dir" -name "$file_pattern" -type f -mtime +$retention_days 2>/dev/null | wc -l)
-    fi
+    # 3. Проверка настроек
+    echo ""
+    echo "Rotation Settings:"
+    check_rotation_settings "$service_name" "$retention_days"
     
-    # Total size
-    local total_size=$(du -sh "$log_dir" 2>/dev/null | awk '{print $1}')
-    
-    # Oldest file
-    local oldest_file=$(find "$log_dir" -name "$file_pattern" -type f -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | awk '{print $2}')
-    local oldest_age=""
-    if [ -n "$oldest_file" ]; then
-        local oldest_days=$(( ($(date +%s) - $(stat -c %Y "$oldest_file" 2>/dev/null || echo 0)) / 86400 ))
-        oldest_age="$oldest_days days"
-    fi
-    
-    # Format output
-    echo "✓ Active log files: $file_count"
-    [ -n "$oldest_age" ] && echo "ℹ Oldest file: $(basename "$oldest_file") ($oldest_age old)"
-    echo "ℹ Total size: $total_size"
-    
-    if [ "$old_files" -gt 0 ]; then
-        echo "⚠ Files older than $retention_days days: $old_files (rotation may not be working)"
-    else
-        echo "✓ Rotation working: yes (no files older than $retention_days days)"
-    fi
+    # 4. Проверка результата работы
+    echo ""
+    echo "Rotation Results:"
+    check_rotation_results "$log_dir" "$file_pattern" "$retention_days"
 }
 
 # Verify metrics collection for monitoring services
