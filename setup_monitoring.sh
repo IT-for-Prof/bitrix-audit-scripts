@@ -394,10 +394,6 @@ get_service_config() {
                 fi
             done
             ;;
-        "atopacctd")
-            # atopacctd doesn't have traditional config file
-            config_file="systemd"
-            ;;
         "psacct"|"acct")
             # Process accounting config
             config_file="systemd"
@@ -447,9 +443,6 @@ get_expected_config() {
             ;;
         "atop")
             echo "LOGGING=yes|LOGINTERVAL=30|LOGSAVINGS=7|LOGROTATE=7|PERIOD=7"
-            ;;
-        "atopacctd")
-            echo "ENABLED=true|RUNNING=true"
             ;;
         "psacct"|"acct")
             echo "ENABLED=true|RUNNING=true"
@@ -574,16 +567,6 @@ check_service_data_collection() {
             ;;
         "atop")
             data_dir="/var/log/atop"
-            ;;
-        "atopacctd")
-            # Check for pacct files
-            if [ -f "/var/run/pacct_source" ] || [ -d "/var/run/pacct_shadow.d" ]; then
-                status="✓ pacct files present"
-            else
-                status="✗ pacct files not found"
-            fi
-            echo "$status"
-            return
             ;;
         "psacct"|"acct")
             # Check for accounting files
@@ -841,10 +824,6 @@ generate_service_report() {
             echo "  • Set LOGINTERVAL=30 for optimal monitoring"
             echo "  • Set LOGSAVINGS=7 for sufficient history"
             ;;
-        "atopacctd")
-            echo "  • Ensure atopacctd service is running"
-            echo "  • Check /var/run/pacct_source exists"
-            ;;
         "psacct"|"acct")
             echo "  • Ensure process accounting is enabled"
             echo "  • Check accounting files are being created"
@@ -1064,7 +1043,7 @@ check_rotation_mechanism() {
                 echo "  ✓ Cron job: /etc/cron.daily/atop"
             fi
             ;;
-        "atopacctd"|"psacct")
+        "psacct")
             if [ -f /etc/logrotate.d/psacct ]; then
                 echo "  ✓ Logrotate config: /etc/logrotate.d/psacct"
             fi
@@ -1110,7 +1089,7 @@ check_rotation_status() {
                 fi
             fi
             ;;
-        "atopacctd"|"psacct")
+        "psacct")
             if [ -f /etc/cron.daily/logrotate ]; then
                 echo "  ✓ Logrotate cron job exists"
             fi
@@ -1133,7 +1112,7 @@ check_rotation_settings() {
         "atop")
             echo "  ℹ Retention period: $retention_days days (LOGSAVINGS)"
             ;;
-        "atopacctd"|"psacct")
+        "psacct")
             if [ -f /etc/logrotate.d/psacct ]; then
                 local rotate=$(grep "^[[:space:]]*rotate" /etc/logrotate.d/psacct | awk '{print $2}')
                 [ -n "$rotate" ] && echo "  ℹ Keeps $rotate old files (logrotate)"
@@ -1201,7 +1180,7 @@ check_log_rotation() {
             [ -z "$retention_days" ] && retention_days=7
             file_pattern="atop_[0-9]*"
             ;;
-        "atopacctd"|"psacct")
+        "psacct")
             log_dir="/var/account"
             file_pattern="pacct*"
             retention_days=0  # psacct не имеет встроенной ротации
@@ -1339,7 +1318,7 @@ enable_services() {
     log_info "Enabling and starting services..."
     
     local services=("sysstat" "atop")
-    local optional_services=("atopacctd")
+    local optional_services=()
     local process_accounting_service=""
     local failed_services=0
     
@@ -1486,23 +1465,6 @@ enable_services() {
     echo ""
     log_info "Processing optional services..."
     
-    # atopacctd
-    if systemctl list-unit-files | grep -q "^atopacctd.service"; then
-        log_info "Processing atopacctd service..."
-        if systemctl enable atopacctd >/dev/null 2>&1; then
-            log_success "atopacctd service enabled"
-            if systemctl start atopacctd >/dev/null 2>&1; then
-                log_success "atopacctd service started"
-            else
-                log_warning "atopacctd service failed to start (optional)"
-            fi
-        else
-            log_warning "atopacctd service not available (optional)"
-        fi
-    else
-        log_info "atopacctd service not available (optional)"
-    fi
-    
     # Process accounting
     if [ -n "$process_accounting_service" ]; then
         log_info "Processing $process_accounting_service service..."
@@ -1568,7 +1530,7 @@ enable_services() {
 disable_services() {
     log_info "Disabling monitoring services..."
     
-    local services=("sysstat" "atop" "atopacctd" "psacct" "acct")
+    local services=("sysstat" "atop" "psacct" "acct")
     local timers=("sysstat-collect.timer" "sysstat-summary.timer" "atop-rotate.timer")
     local services_stopped=0
     local services_disabled=0
@@ -2080,7 +2042,7 @@ main() {
         echo "================================================"
         echo ""
         
-        local services=("sysstat" "atop" "atopacctd")
+        local services=("sysstat" "atop")
         local process_accounting_service=""
         
         # Determine process accounting service name
