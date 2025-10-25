@@ -475,6 +475,24 @@ compare_config_with_expected() {
             else
                 issues="${issues}✗ HISTORY not set\n"
             fi
+            
+            # Check SADC_OPTIONS
+            local sadc_opts=$(echo "$current_config" | grep -o 'SADC_OPTIONS=.*' | cut -d'"' -f2)
+            if echo "$sadc_opts" | grep -qE "XALL|ALL"; then
+                issues="${issues}✓ SADC_OPTIONS: $sadc_opts (collecting all metrics)\n"
+            else
+                issues="${issues}✗ SADC_OPTIONS: $sadc_opts (should contain XALL or ALL)\n"
+            fi
+            
+            # Check collection interval
+            local interval=$(check_collection_interval "sysstat")
+            if [ "$interval" -le 60 ]; then
+                issues="${issues}✓ Collection interval: ${interval}s (optimal)\n"
+            elif [ "$interval" -le 300 ]; then
+                warnings="${warnings}⚠ Collection interval: ${interval}s (recommended: ≤60s)\n"
+            else
+                issues="${issues}✗ Collection interval: ${interval}s (too long, expected: ≤60s)\n"
+            fi
             ;;
             
         "atop")
@@ -511,6 +529,14 @@ compare_config_with_expected() {
                 fi
             else
                 issues="${issues}✗ LOGSAVINGS not set\n"
+            fi
+            
+            # Check LOGOPTS (should be empty or contain useful options)
+            local logopts=$(echo "$current_config" | grep -o 'LOGOPTS=.*' | cut -d'"' -f2)
+            if [ -z "$logopts" ]; then
+                issues="${issues}✓ LOGOPTS: (default - all metrics)\n"
+            else
+                issues="${issues}ℹ LOGOPTS: $logopts\n"
             fi
             ;;
     esac
@@ -729,6 +755,41 @@ diagnose_service_comprehensive() {
         echo -e "$data_collection"
     fi
     
+    # Data Collection Parameters
+    echo ""
+    echo "Data Collection Parameters:"
+    case "$service_name" in
+        "sysstat")
+            local interval=$(check_collection_interval "sysstat")
+            local sadc_opts=$(grep "^SADC_OPTIONS=" "/etc/sysconfig/sysstat" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
+            local history=$(grep "^HISTORY=" "/etc/sysconfig/sysstat" 2>/dev/null | cut -d= -f2)
+            local compression=$(grep "^ZIP=" "/etc/sysconfig/sysstat" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
+            
+            echo "  ℹ Collection interval: ${interval}s"
+            echo "  ℹ Metrics collected: ${sadc_opts:-not set}"
+            echo "  ℹ Retention period: ${history:-not set} days"
+            [ -n "$compression" ] && echo "  ℹ Compression: $compression"
+            ;;
+        "atop")
+            local interval=$(grep "^LOGINTERVAL=" "/etc/sysconfig/atop" 2>/dev/null | cut -d= -f2)
+            local retention=$(grep "^LOGSAVINGS=" "/etc/sysconfig/atop" 2>/dev/null | cut -d= -f2)
+            
+            echo "  ℹ Collection interval: ${interval:-not set}s"
+            echo "  ℹ Metrics collected: ALL (CPU, MEM, DSK, NET, PRG)"
+            echo "  ℹ Retention period: ${retention:-not set} days"
+            ;;
+    esac
+    
+    # Log Rotation Status
+    echo ""
+    echo "Log Rotation Status:"
+    check_log_rotation "$service_name" | sed 's/^/  /'
+    
+    # Metrics Verification
+    echo ""
+    echo "Metrics Verification:"
+    verify_metrics_collection "$service_name" | sed 's/^/  /'
+    
     if [ -n "$timer_info" ]; then
         echo -e "\n$timer_info"
     fi
@@ -845,6 +906,10 @@ configure_sysstat() {
         sed -ri 's/^HISTORY=.*/HISTORY=7/' "$sysstat_config" || \
         echo 'HISTORY=7' >> "$sysstat_config"
         
+        # Set SADC_OPTIONS to collect all metrics
+        sed -ri 's/^SADC_OPTIONS=.*/SADC_OPTIONS="-S XALL"/' "$sysstat_config" || \
+        echo 'SADC_OPTIONS="-S XALL"' >> "$sysstat_config"
+        
         log_success "sysstat configuration updated"
     else
         log_warning "sysstat config file not found: $sysstat_config"
@@ -854,9 +919,9 @@ configure_sysstat() {
     if [ -n "$cron_file" ] && [ -f "$cron_file" ]; then
         backup_file "$cron_file"
         
-        # Update sa1 to run every minute with 30-second intervals
-        sed -ri 's#^[^#].*sa1.*#* * * * * root /usr/lib64/sa/sa1 30 2 \&>/dev/null#' "$cron_file" || \
-        sed -ri 's#^[^#].*sa1.*#* * * * * root /usr/lib/sa/sa1 30 2 \&>/dev/null#' "$cron_file" || true
+        # Update sa1 to run every minute with 30-second intervals and XALL
+        sed -ri 's#^[^#].*sa1.*#* * * * * root /usr/lib64/sa/sa1 -S XALL 30 2 \&>/dev/null#' "$cron_file" || \
+        sed -ri 's#^[^#].*sa1.*#* * * * * root /usr/lib/sa/sa1 -S XALL 30 2 \&>/dev/null#' "$cron_file" || true
         
         # Ensure sa2 exists for daily reports
         if ! grep -q 'sa2' "$cron_file"; then
@@ -869,9 +934,39 @@ configure_sysstat() {
         # On newer systems (AlmaLinux 9+), sysstat uses systemd timers
         log_info "sysstat uses systemd timers (modern configuration)"
         
+        # Configure 30-second collection interval for systemd timers
+        log_info "Configuring 30-second collection interval..."
+        
+        # Create override directory for timer
+        mkdir -p /etc/systemd/system/sysstat-collect.timer.d/
+        
+        # Create timer override for 30-second interval
+        cat > /etc/systemd/system/sysstat-collect.timer.d/override.conf << 'EOF'
+[Timer]
+# Disable default 10-minute interval
+OnCalendar=
+# Set 30-second interval
+OnCalendar=*:*:0/30
+EOF
+        
+        # Create override directory for service
+        mkdir -p /etc/systemd/system/sysstat-collect.service.d/
+        
+        # Create service override to use XALL
+        cat > /etc/systemd/system/sysstat-collect.service.d/override.conf << 'EOF'
+[Service]
+# Use XALL for collecting all metrics
+ExecStart=
+ExecStart=/usr/lib64/sa/sadc -S XALL 1 1 -
+EOF
+        
+        # Reload systemd and restart timer
+        systemctl daemon-reload
+        systemctl restart sysstat-collect.timer
+        
         # Check if timers are active
         if systemctl is-active --quiet sysstat-collect.timer; then
-            log_success "sysstat-collect timer is active"
+            log_success "sysstat-collect timer is active (30-second interval)"
         else
             log_warning "sysstat-collect timer is not active"
         fi
@@ -884,6 +979,145 @@ configure_sysstat() {
     else
         log_warning "sysstat cron file not found: $cron_file"
     fi
+}
+
+# Check collection interval for monitoring services
+check_collection_interval() {
+    local service_name="$1"
+    local interval=0
+    
+    case "$service_name" in
+        "sysstat")
+            # For systemd timers
+            if systemctl list-unit-files | grep -q "sysstat-collect.timer"; then
+                # Check OnCalendar in timer (check both original and override)
+                local timer_interval=$(systemctl cat sysstat-collect.timer 2>/dev/null | grep "OnCalendar=" | tail -1)
+                if echo "$timer_interval" | grep -q "0/30"; then
+                    interval=30
+                elif echo "$timer_interval" | grep -q "0/10"; then
+                    interval=600  # 10 minutes
+                else
+                    interval=600  # Default if not found
+                fi
+            # For cron
+            elif [ -f /etc/cron.d/sysstat ]; then
+                # Check interval in cron (sa1 30 2 = 30 seconds, 2 times)
+                if grep -q "sa1.*30.*2" /etc/cron.d/sysstat; then
+                    interval=30
+                elif grep -q "sa1" /etc/cron.d/sysstat; then
+                    interval=600  # Default 10 minutes
+                fi
+            else
+                interval=600  # Default if no timer/cron found
+            fi
+            ;;
+        "atop")
+            # From config
+            interval=$(grep "^LOGINTERVAL=" /etc/sysconfig/atop /etc/default/atop 2>/dev/null | cut -d= -f2 | head -1)
+            ;;
+    esac
+    
+    echo "$interval"
+}
+
+# Check log rotation status for monitoring services
+check_log_rotation() {
+    local service_name="$1"
+    local log_dir=""
+    local retention_days=0
+    local file_pattern=""
+    
+    case "$service_name" in
+        "sysstat")
+            log_dir="/var/log/sa"
+            retention_days=7
+            file_pattern="sa[0-9][0-9]"
+            ;;
+        "atop")
+            log_dir="/var/log/atop"
+            retention_days=$(grep "^LOGSAVINGS=" /etc/sysconfig/atop /etc/default/atop 2>/dev/null | cut -d= -f2 | head -1)
+            [ -z "$retention_days" ] && retention_days=7
+            file_pattern="atop_[0-9]*"
+            ;;
+        "psacct")
+            log_dir="/var/account"
+            file_pattern="pacct*"
+            ;;
+    esac
+    
+    if [ ! -d "$log_dir" ]; then
+        echo "✗ Log directory not found: $log_dir"
+        return 1
+    fi
+    
+    # Count files
+    local file_count=$(find "$log_dir" -name "$file_pattern" -type f 2>/dev/null | wc -l)
+    
+    # Check old files
+    local old_files=0
+    if [ "$retention_days" -gt 0 ]; then
+        old_files=$(find "$log_dir" -name "$file_pattern" -type f -mtime +$retention_days 2>/dev/null | wc -l)
+    fi
+    
+    # Total size
+    local total_size=$(du -sh "$log_dir" 2>/dev/null | awk '{print $1}')
+    
+    # Oldest file
+    local oldest_file=$(find "$log_dir" -name "$file_pattern" -type f -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | awk '{print $2}')
+    local oldest_age=""
+    if [ -n "$oldest_file" ]; then
+        local oldest_days=$(( ($(date +%s) - $(stat -c %Y "$oldest_file" 2>/dev/null || echo 0)) / 86400 ))
+        oldest_age="$oldest_days days"
+    fi
+    
+    # Format output
+    echo "✓ Active log files: $file_count"
+    [ -n "$oldest_age" ] && echo "ℹ Oldest file: $(basename "$oldest_file") ($oldest_age old)"
+    echo "ℹ Total size: $total_size"
+    
+    if [ "$old_files" -gt 0 ]; then
+        echo "⚠ Files older than $retention_days days: $old_files (rotation may not be working)"
+    else
+        echo "✓ Rotation working: yes (no files older than $retention_days days)"
+    fi
+}
+
+# Verify metrics collection for monitoring services
+verify_metrics_collection() {
+    local service_name="$1"
+    
+    case "$service_name" in
+        "sysstat")
+            # Check latest sa file
+            local latest_sa=$(ls -t /var/log/sa/sa[0-9][0-9] 2>/dev/null | head -1)
+            if [ -n "$latest_sa" ]; then
+                # Check for various metrics
+                local has_cpu=$(sar -u -f "$latest_sa" 2>/dev/null | grep -c "Average")
+                local has_mem=$(sar -r -f "$latest_sa" 2>/dev/null | grep -c "Average")
+                local has_disk=$(sar -d -f "$latest_sa" 2>/dev/null | grep -c "Average")
+                local has_net=$(sar -n DEV -f "$latest_sa" 2>/dev/null | grep -c "Average")
+                
+                echo "Metrics verification:"
+                [ "$has_cpu" -gt 0 ] && echo "  ✓ CPU metrics: present" || echo "  ✗ CPU metrics: missing"
+                [ "$has_mem" -gt 0 ] && echo "  ✓ Memory metrics: present" || echo "  ✗ Memory metrics: missing"
+                [ "$has_disk" -gt 0 ] && echo "  ✓ Disk metrics: present" || echo "  ✗ Disk metrics: missing"
+                [ "$has_net" -gt 0 ] && echo "  ✓ Network metrics: present" || echo "  ✗ Network metrics: missing"
+            fi
+            ;;
+        "atop")
+            # Check latest atop file
+            local latest_atop=$(ls -t /var/log/atop/atop_* 2>/dev/null | head -1)
+            if [ -n "$latest_atop" ]; then
+                local has_sections=$(atop -r "$latest_atop" -P CPU,MEM,DSK,NET 2>/dev/null | grep -c "^CPU\|^MEM\|^DSK\|^NET")
+                
+                if [ "$has_sections" -gt 0 ]; then
+                    echo "  ✓ All metric sections present (CPU, MEM, DSK, NET)"
+                else
+                    echo "  ✗ Some metric sections missing"
+                fi
+            fi
+            ;;
+    esac
 }
 
 # Configure atop
