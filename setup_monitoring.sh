@@ -726,6 +726,10 @@ diagnose_service_comprehensive() {
     echo "Overall Status: $overall_status"
     echo "Service Status: $status ($description)"
     echo "Config File: $config_file"
+    if [ -n "$config_data" ] && [ "$config_file" != "systemd" ]; then
+        echo ""
+        echo "$config_data"
+    fi
     
     # Show how service is started
     case "$status" in
@@ -1060,7 +1064,7 @@ check_rotation_mechanism() {
                 echo "  ✓ Cron job: /etc/cron.daily/atop"
             fi
             ;;
-        "psacct")
+        "atopacctd"|"psacct")
             if [ -f /etc/logrotate.d/psacct ]; then
                 echo "  ✓ Logrotate config: /etc/logrotate.d/psacct"
             fi
@@ -1106,7 +1110,7 @@ check_rotation_status() {
                 fi
             fi
             ;;
-        "psacct")
+        "atopacctd"|"psacct")
             if [ -f /etc/cron.daily/logrotate ]; then
                 echo "  ✓ Logrotate cron job exists"
             fi
@@ -1129,10 +1133,12 @@ check_rotation_settings() {
         "atop")
             echo "  ℹ Retention period: $retention_days days (LOGSAVINGS)"
             ;;
-        "psacct")
+        "atopacctd"|"psacct")
             if [ -f /etc/logrotate.d/psacct ]; then
                 local rotate=$(grep "^[[:space:]]*rotate" /etc/logrotate.d/psacct | awk '{print $2}')
                 [ -n "$rotate" ] && echo "  ℹ Keeps $rotate old files (logrotate)"
+            else
+                echo "  ℹ No automatic rotation configured"
             fi
             ;;
     esac
@@ -1185,17 +1191,20 @@ check_log_rotation() {
     case "$service_name" in
         "sysstat")
             log_dir="/var/log/sa"
-            retention_days=7
+            retention_days=$(grep "^HISTORY=" /etc/sysconfig/sysstat /etc/default/sysstat 2>/dev/null | head -1 | cut -d= -f2 || true)
+            [ -z "$retention_days" ] && retention_days=7
             file_pattern="sa[0-9][0-9]"
             ;;
         "atop")
             log_dir="/var/log/atop"
-            retention_days=7
+            retention_days=$(grep "^LOGSAVINGS=" /etc/sysconfig/atop /etc/default/atop 2>/dev/null | head -1 | cut -d= -f2 || true)
+            [ -z "$retention_days" ] && retention_days=7
             file_pattern="atop_[0-9]*"
             ;;
-        "psacct")
+        "atopacctd"|"psacct")
             log_dir="/var/account"
             file_pattern="pacct*"
+            retention_days=0  # psacct не имеет встроенной ротации
             ;;
     esac
     
