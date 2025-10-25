@@ -23,41 +23,8 @@ NON_INTERACTIVE=0
 VERBOSE=0
 DIAGNOSE_ONLY=0
 CHECK_ONLY=0
-
-# Parse command line arguments
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --force)
-            FORCE_INSTALL=1
-            shift
-            ;;
-        --non-interactive)
-            NON_INTERACTIVE=1
-            shift
-            ;;
-        --verbose|-v)
-            VERBOSE=1
-            shift
-            ;;
-        --diagnose)
-            DIAGNOSE_ONLY=1
-            shift
-            ;;
-        --check-only)
-            CHECK_ONLY=1
-            shift
-            ;;
-        --help|-h)
-            show_help
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            show_help
-            exit 1
-            ;;
-    esac
-done
+DISABLE_SERVICES=0
+UNINSTALL_PACKAGES=0
 
 # Show help
 show_help() {
@@ -72,6 +39,8 @@ OPTIONS:
     --verbose, -v           Enable verbose output
     --diagnose              Run comprehensive diagnostics without making changes
     --check-only            Check current setup status without installation
+    --disable               Stop and disable monitoring services (keep packages and configs)
+    --uninstall             Completely remove monitoring packages and delete collected data
     --help, -h              Show this help
 
 DESCRIPTION:
@@ -97,6 +66,8 @@ EXAMPLES:
     $0 --force --verbose     # Force reconfiguration with detailed output
     $0 --diagnose            # Run comprehensive diagnostics
     $0 --check-only          # Check current status only
+    $0 --disable             # Stop and disable monitoring services
+    $0 --uninstall           # Completely remove monitoring tools
 
 DIAGNOSTIC MODES:
     --diagnose               Generates detailed reports for all services including:
@@ -107,11 +78,55 @@ DIAGNOSTIC MODES:
     
     --check-only             Quick status check showing:
                             - Service status with indicators (✓/⚠/✗)
+                            - Configuration compliance
                             - Data collection status
-                            - Recommendations for next steps
+                            - Quick recommendations
 
 EOF
 }
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force)
+            FORCE_INSTALL=1
+            shift
+            ;;
+        --non-interactive)
+            NON_INTERACTIVE=1
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=1
+            shift
+            ;;
+        --diagnose)
+            DIAGNOSE_ONLY=1
+            shift
+            ;;
+        --check-only)
+            CHECK_ONLY=1
+            shift
+            ;;
+        --disable)
+            DISABLE_SERVICES=1
+            shift
+            ;;
+        --uninstall)
+            UNINSTALL_PACKAGES=1
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
 
 # Helper functions
 log() {
@@ -762,7 +777,7 @@ diagnose_service_comprehensive() {
         "sysstat")
             local interval=$(check_collection_interval "sysstat")
             local sadc_opts=$(grep "^SADC_OPTIONS=" "/etc/sysconfig/sysstat" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
-            local history=$(grep "^HISTORY=" "/etc/sysconfig/sysstat" 2>/dev/null | cut -d= -f2)
+            local history=$(grep "^HISTORY=" "/etc/sysconfig/sysstat" 2>/dev/null | cut -d= -f2 | head -1)
             local compression=$(grep "^ZIP=" "/etc/sysconfig/sysstat" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
             
             echo "  ℹ Collection interval: ${interval}s"
@@ -1197,6 +1212,13 @@ enable_services() {
     local process_accounting_service=""
     local failed_services=0
     
+    # Variables for statistics collection
+    local services_started=0
+    local services_restarted=0
+    local services_failed=0
+    local warnings=()
+    local errors=()
+    
     # Determine process accounting service name
     case "$PACKAGE_MANAGER" in
         "apt")
@@ -1248,31 +1270,84 @@ enable_services() {
             continue
         fi
         
-        # Start service
-        log_info "Starting $service service..."
-        if systemctl start "$service" >/dev/null 2>&1; then
-            log_success "$service service started"
-            
-            # Verify it's actually running
-            sleep 2
+        # Start/Restart service
+        if [ "$FORCE_INSTALL" -eq 1 ]; then
+            # При --force всегда перезапускаем для применения новых настроек
             if systemctl is-active "$service" >/dev/null 2>&1; then
-                log_success "$service service is running"
-                
-                # Check and enable associated timers
-                check_and_enable_timers "$service"
-            elif [ "$timer_based" = true ]; then
-                log_info "$service uses timers, checking timer status..."
-                check_and_enable_timers "$service"
-                log_success "$service configured for timer-based operation"
+                log_info "Restarting $service service to apply new configuration..."
+                if systemctl restart "$service" >/dev/null 2>&1; then
+                    log_success "$service service restarted"
+                    services_restarted=$((services_restarted + 1))
+                    
+                    # Проверить состояние после перезапуска
+                    sleep 2
+                    if systemctl is-active "$service" >/dev/null 2>&1; then
+                        log_success "$service service is running after restart"
+                        check_and_enable_timers "$service"
+                    else
+                        log_error "$service service failed to start after restart"
+                        log_info "Check logs: journalctl -u $service"
+                        errors+=("$service failed to start after restart")
+                        services_failed=$((services_failed + 1))
+                    fi
+                else
+                    log_error "Failed to restart $service service"
+                    log_info "Check logs: journalctl -u $service"
+                    errors+=("Failed to restart $service")
+                    services_failed=$((services_failed + 1))
+                    continue
+                fi
             else
-                log_warning "$service service started but not running"
-                log_info "Check logs: journalctl -u $service"
-                failed_services=$((failed_services + 1))
+                # Служба не запущена, просто запускаем
+                log_info "Starting $service service..."
+                if systemctl start "$service" >/dev/null 2>&1; then
+                    log_success "$service service started"
+                    services_started=$((services_started + 1))
+                    
+                    # Проверить состояние после запуска
+                    sleep 2
+                    if systemctl is-active "$service" >/dev/null 2>&1; then
+                        log_success "$service service is running"
+                        check_and_enable_timers "$service"
+                    else
+                        log_warning "$service service started but not running"
+                        log_info "Check logs: journalctl -u $service"
+                        warnings+=("$service started but not running")
+                        services_failed=$((services_failed + 1))
+                    fi
+                else
+                    log_error "Failed to start $service service"
+                    log_info "Check logs: journalctl -u $service"
+                    errors+=("Failed to start $service")
+                    services_failed=$((services_failed + 1))
+                    continue
+                fi
             fi
         else
-            log_error "Failed to start $service service"
-            log_info "Check logs: journalctl -u $service"
-            failed_services=$((failed_services + 1))
+            # Без --force просто запускаем если не запущена
+            log_info "Starting $service service..."
+            if systemctl start "$service" >/dev/null 2>&1; then
+                log_success "$service service started"
+                services_started=$((services_started + 1))
+                
+                # Проверить состояние
+                sleep 2
+                if systemctl is-active "$service" >/dev/null 2>&1; then
+                    log_success "$service service is running"
+                    check_and_enable_timers "$service"
+                else
+                    log_warning "$service service started but not running"
+                    log_info "Check logs: journalctl -u $service"
+                    warnings+=("$service started but not running")
+                    services_failed=$((services_failed + 1))
+                fi
+            else
+                log_error "Failed to start $service service"
+                log_info "Check logs: journalctl -u $service"
+                errors+=("Failed to start $service")
+                services_failed=$((services_failed + 1))
+                continue
+            fi
         fi
     done
     
@@ -1319,25 +1394,242 @@ enable_services() {
     # Summary
     echo ""
     echo "================================================"
-    echo "SERVICE STARTUP SUMMARY"
+    echo "OPERATION SUMMARY"
     echo "================================================"
+    echo "Operation: Monitoring Setup"
+    echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Distribution: $DISTRO_ID $DISTRO_VERSION"
+    echo ""
+    echo "Actions performed:"
+    [ "$services_started" -gt 0 ] && echo "  ✓ Started $services_started service(s)"
+    [ "$services_restarted" -gt 0 ] && echo "  ✓ Restarted $services_restarted service(s)"
+    echo ""
     
-    if [ "$failed_services" -eq 0 ]; then
-        log_success "All main services started successfully"
-    else
-        log_error "$failed_services main service(s) failed to start"
+    if [ ${#warnings[@]} -gt 0 ]; then
+        echo "Warnings (${#warnings[@]}):"
+        for warning in "${warnings[@]}"; do
+            echo "  ⚠ $warning"
+        done
         echo ""
-        echo "Troubleshooting steps:"
-        echo "  1. Check service logs: journalctl -u <service_name>"
-        echo "  2. Check configuration files for errors"
-        echo "  3. Verify package installation: rpm -qa | grep <package>"
-        echo "  4. Try manual start: systemctl start <service_name>"
-        echo "  5. Run diagnostics: $0 --diagnose"
     fi
     
+    if [ ${#errors[@]} -gt 0 ]; then
+        echo "Errors (${#errors[@]}):"
+        for error in "${errors[@]}"; do
+            echo "  ✗ $error"
+        done
+        echo ""
+    fi
+    
+    if [ "$services_failed" -eq 0 ]; then
+        echo "Status: ✅ Success"
+    elif [ "$services_failed" -lt 2 ]; then
+        echo "Status: ⚠ Completed with warnings"
+    else
+        echo "Status: ✗ Failed"
+    fi
     echo "================================================"
     
     return $failed_services
+}
+
+# Disable monitoring services
+disable_services() {
+    log_info "Disabling monitoring services..."
+    
+    local services=("sysstat" "atop" "atopacctd" "psacct" "acct")
+    local timers=("sysstat-collect.timer" "sysstat-summary.timer" "atop-rotate.timer")
+    local services_stopped=0
+    local services_disabled=0
+    local timers_stopped=0
+    local warnings=()
+    
+    echo ""
+    echo "================================================"
+    echo "SERVICE DISABLING"
+    echo "================================================"
+    
+    # Остановить и отключить службы
+    for service in "${services[@]}"; do
+        if systemctl list-unit-files | grep -q "^${service}.service"; then
+            echo ""
+            log_info "Processing $service service..."
+            
+            # Остановить службу
+            if systemctl is-active "$service" >/dev/null 2>&1; then
+                log_info "Stopping $service service..."
+                if systemctl stop "$service" >/dev/null 2>&1; then
+                    log_success "$service service stopped"
+                    services_stopped=$((services_stopped + 1))
+                else
+                    log_warning "Failed to stop $service service"
+                    warnings+=("Failed to stop $service")
+                fi
+            else
+                log_info "$service service is not running"
+            fi
+            
+            # Отключить автозапуск
+            if systemctl is-enabled "$service" >/dev/null 2>&1; then
+                log_info "Disabling $service service..."
+                if systemctl disable "$service" >/dev/null 2>&1; then
+                    log_success "$service service disabled"
+                    services_disabled=$((services_disabled + 1))
+                else
+                    log_warning "Failed to disable $service service"
+                    warnings+=("Failed to disable $service")
+                fi
+            else
+                log_info "$service service is not enabled"
+            fi
+        fi
+    done
+    
+    # Остановить и отключить таймеры
+    echo ""
+    log_info "Processing timers..."
+    for timer in "${timers[@]}"; do
+        if systemctl list-unit-files | grep -q "^${timer}"; then
+            if systemctl is-active "$timer" >/dev/null 2>&1; then
+                systemctl stop "$timer" >/dev/null 2>&1
+                log_success "$timer stopped"
+                timers_stopped=$((timers_stopped + 1))
+            fi
+            if systemctl is-enabled "$timer" >/dev/null 2>&1; then
+                systemctl disable "$timer" >/dev/null 2>&1
+                log_success "$timer disabled"
+            fi
+        fi
+    done
+    
+    # Summary
+    echo ""
+    echo "================================================"
+    echo "OPERATION SUMMARY"
+    echo "================================================"
+    echo "Operation: Disable Monitoring Services"
+    echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo ""
+    echo "Actions performed:"
+    [ "$services_stopped" -gt 0 ] && echo "  ✓ Stopped $services_stopped service(s)"
+    [ "$services_disabled" -gt 0 ] && echo "  ✓ Disabled $services_disabled service(s)"
+    [ "$timers_stopped" -gt 0 ] && echo "  ✓ Stopped $timers_stopped timer(s)"
+    echo "  ✓ Packages preserved"
+    echo "  ✓ Configuration files preserved"
+    echo "  ✓ Collected data preserved"
+    echo ""
+    
+    if [ ${#warnings[@]} -gt 0 ]; then
+        echo "Warnings (${#warnings[@]}):"
+        for warning in "${warnings[@]}"; do
+            echo "  ⚠ $warning"
+        done
+        echo ""
+    fi
+    
+    echo "Status: ✅ Success"
+    echo "================================================"
+}
+
+# Uninstall monitoring tools
+uninstall_monitoring() {
+    log_info "Uninstalling monitoring tools..."
+    
+    # Сначала отключить все службы
+    disable_services
+    
+    echo ""
+    echo "================================================"
+    echo "PACKAGE REMOVAL"
+    echo "================================================"
+    
+    local packages=("sysstat" "atop" "sysbench" "psacct")
+    local packages_removed=0
+    local data_dirs_removed=0
+    local total_size_freed=0
+    local warnings=()
+    
+    # Удалить пакеты
+    log_info "Removing packages..."
+    case "$PACKAGE_MANAGER" in
+        "apt")
+            apt-get remove -y "${packages[@]}" 2>&1 | grep -v "^Reading\|^Building"
+            apt-get autoremove -y 2>&1 | grep -v "^Reading\|^Building"
+            ;;
+        "dnf"|"yum")
+            $PACKAGE_MANAGER remove -y "${packages[@]}"
+            ;;
+    esac
+    
+    log_success "Packages removed"
+    packages_removed=${#packages[@]}
+    
+    # Удалить собранные данные
+    echo ""
+    log_info "Removing collected data..."
+    
+    local data_dirs=(
+        "/var/log/sa"
+        "/var/log/atop"
+        "/var/account"
+    )
+    
+    for dir in "${data_dirs[@]}"; do
+        if [ -d "$dir" ]; then
+            local dir_size=$(du -sb "$dir" 2>/dev/null | awk '{print $1}')
+            total_size_freed=$((total_size_freed + dir_size))
+            rm -rf "$dir"
+            log_success "Removed $dir"
+            data_dirs_removed=$((data_dirs_removed + 1))
+        fi
+    done
+    
+    local size_mb=$((total_size_freed / 1024 / 1024))
+    log_info "Freed ${size_mb}MB of disk space"
+    
+    # Удалить systemd overrides
+    echo ""
+    log_info "Removing systemd overrides..."
+    local override_dirs=(
+        "/etc/systemd/system/sysstat-collect.timer.d"
+        "/etc/systemd/system/sysstat-collect.service.d"
+    )
+    
+    for dir in "${override_dirs[@]}"; do
+        if [ -d "$dir" ]; then
+            rm -rf "$dir"
+            log_success "Removed $dir"
+        fi
+    done
+    
+    systemctl daemon-reload
+    
+    # Summary
+    echo ""
+    echo "================================================"
+    echo "OPERATION SUMMARY"
+    echo "================================================"
+    echo "Operation: Uninstall Monitoring Tools"
+    echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo ""
+    echo "Actions performed:"
+    echo "  ✓ Stopped and disabled all services"
+    [ "$packages_removed" -gt 0 ] && echo "  ✓ Removed $packages_removed package(s)"
+    [ "$data_dirs_removed" -gt 0 ] && echo "  ✓ Removed $data_dirs_removed data directory(ies)"
+    [ "$total_size_freed" -gt 0 ] && echo "  ✓ Freed ${size_mb}MB of disk space"
+    echo "  ✓ Configuration backups preserved"
+    echo ""
+    
+    if [ ${#warnings[@]} -gt 0 ]; then
+        echo "Warnings (${#warnings[@]}):"
+        for warning in "${warnings[@]}"; do
+            echo "  ⚠ $warning"
+        done
+        echo ""
+    fi
+    
+    echo "Status: ✅ Success"
+    echo "================================================"
 }
 
 # Verify setup
@@ -1687,6 +1979,44 @@ main() {
         echo "  • Run setup with --force to apply fixes"
         echo "  • Use --check-only for quick status updates"
         echo ""
+        exit 0
+    fi
+    
+    # Handle disable mode
+    if [ "$DISABLE_SERVICES" -eq 1 ]; then
+        echo ""
+        log_warning "This will stop and disable all monitoring services"
+        log_info "Packages and configuration files will be preserved"
+        echo ""
+        
+        if [ "$NON_INTERACTIVE" -eq 0 ]; then
+            read -p "Continue with disabling? [y/N]: " confirm
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                log_info "Operation cancelled"
+                exit 0
+            fi
+        fi
+        
+        disable_services
+        exit 0
+    fi
+    
+    # Handle uninstall mode
+    if [ "$UNINSTALL_PACKAGES" -eq 1 ]; then
+        echo ""
+        log_warning "This will completely remove monitoring tools and delete all collected data"
+        log_error "This action cannot be undone!"
+        echo ""
+        
+        if [ "$NON_INTERACTIVE" -eq 0 ]; then
+            read -p "Are you sure you want to uninstall? [y/N]: " confirm
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                log_info "Operation cancelled"
+                exit 0
+            fi
+        fi
+        
+        uninstall_monitoring
         exit 0
     fi
     
